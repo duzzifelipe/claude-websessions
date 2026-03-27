@@ -19,7 +19,7 @@ window.websessions = (function() {
   // splitTree: null for single session, or:
   // { type:'split', dir:'horizontal'|'vertical', children: [node, node] }
   // leaf: { type:'session', id:'...', name:'...' }
-  var openTabs = []; // [{id, name, state, splitTree: node|null}]
+  var openTabs = []; // [{id, name, state, type, provider, splitTree: node|null}]
   var activeTabId = null;
 
   var darkTermTheme = {
@@ -273,7 +273,7 @@ window.websessions = (function() {
 
     var newSessionBtn = document.createElement('button');
     newSessionBtn.className = 'split-picker-action';
-    newSessionBtn.textContent = '+ New Claude Session';
+    newSessionBtn.textContent = '+ New Session';
     newSessionBtn.addEventListener('click', function() {
       overlay.remove();
       htmx.ajax('GET', '/sessions/new', { target: '#modal', swap: 'innerHTML' });
@@ -650,6 +650,7 @@ window.websessions = (function() {
       var xhr = event.detail.xhr;
       var sid = xhr ? xhr.getResponseHeader('X-Session-ID') : null;
       var sname = xhr ? xhr.getResponseHeader('X-Session-Name') : null;
+      var stype = xhr ? xhr.getResponseHeader('X-Session-Type') : null;
       if (!sid) {
         sid = panes[0].dataset.sessionId;
         var titleEl = panes[0].querySelector('.pane-title');
@@ -659,8 +660,12 @@ window.websessions = (function() {
         // Add tab without reloading terminal (openTab would clear the area)
         var existing = openTabs.find(function(t) { return t.id === sid; });
         var isNew = !existing;
+        var provider = providerFromSessionType(stype);
         if (isNew) {
-          openTabs.push({ id: sid, name: sname || sid, state: 'running' });
+          openTabs.push({ id: sid, name: sname || sid, state: 'running', type: stype || '', provider: provider });
+        } else {
+          if (stype && !existing.type) existing.type = stype;
+          if (provider && !existing.provider) existing.provider = provider;
         }
         activeTabId = sid;
         currentlyShowingTabId = sid;
@@ -675,6 +680,13 @@ window.websessions = (function() {
   });
 
   // Close new session modal after successful form submission
+  document.addEventListener('htmx:configRequest', function(event) {
+    var form = event.detail.elt;
+    if (!form || form.id !== 'new-session-form') return;
+    if (!event.detail.parameters) event.detail.parameters = {};
+    event.detail.parameters.provider = selectedProvider();
+  });
+
   document.addEventListener('htmx:afterRequest', function(event) {
     var form = event.detail.elt;
     if (form && form.id === 'new-session-form' && event.detail.successful) {
@@ -685,8 +697,9 @@ window.websessions = (function() {
       if (xhr) {
         var sessionID = xhr.getResponseHeader('X-Session-ID');
         var sessionName = xhr.getResponseHeader('X-Session-Name');
+        var sessionType = xhr.getResponseHeader('X-Session-Type') || selectedProvider();
         if (sessionID) {
-          openTab(sessionID, sessionName || sessionID, 'running');
+          openTab(sessionID, sessionName || sessionID, 'running', sessionType);
         }
       }
       refreshSidebar();
@@ -749,8 +762,8 @@ window.websessions = (function() {
         nameInput.value = path.split('/').pop();
       }
       if (nameInput) nameInput.focus();
-      // Load claude sessions for the selected directory
-      loadClaudeSessions(path);
+      // Load resumable provider sessions for the selected directory
+      loadProviderSessions(path);
     }
   }
 
@@ -814,8 +827,8 @@ window.websessions = (function() {
     if (nameInput) { nameInput.value = name; nameInput.focus(); nameInput.select(); }
     if (promptInput) promptInput.value = '';
     if (resumeInput) resumeInput.value = '';
-    // Load claude sessions for this directory
-    loadClaudeSessions(dir);
+    // Load resumable provider sessions for this directory
+    loadProviderSessions(dir);
     // Scroll to form
     var form = document.getElementById('new-session-form');
     if (form) form.scrollIntoView({ behavior: 'smooth' });
@@ -825,6 +838,7 @@ window.websessions = (function() {
   var currentlyShowingTabId = null;
 
   function openTab(sessionID, name, state) {
+    var sessionType = arguments.length > 3 ? arguments[3] : '';
     var focusTarget = sessionID; // remember which session to focus
 
     // Check if session is inside an existing split group — focus that tab instead
@@ -835,13 +849,18 @@ window.websessions = (function() {
       sessionID = groupTab.id;
       name = groupTab.name;
       state = groupTab.state;
+      sessionType = groupTab.type || sessionType;
     }
 
     // Add to tabs if not already open
     var existing = openTabs.find(function(t) { return t.id === sessionID; });
+    var provider = providerFromSessionType(sessionType);
     if (!existing) {
-      openTabs.push({ id: sessionID, name: name || sessionID, state: state || 'running' });
+      openTabs.push({ id: sessionID, name: name || sessionID, state: state || 'running', type: sessionType || '', provider: provider });
       saveTabState();
+    } else {
+      if (sessionType && !existing.type) existing.type = sessionType;
+      if (provider && !existing.provider) existing.provider = provider;
     }
 
     // If already showing this tab AND its terminal is in the DOM, just focus
@@ -1054,6 +1073,14 @@ window.websessions = (function() {
         input.select();
       });
       btn.appendChild(nameSpan);
+
+      if (tabProvider(tab) === 'opencode') {
+        var providerBadge = document.createElement('span');
+        providerBadge.className = 'tab-provider-badge';
+        providerBadge.textContent = 'OC';
+        providerBadge.title = 'OpenCode session';
+        btn.appendChild(providerBadge);
+      }
 
       if (tab.splitTree) {
         var ids = treeSessionIds(tab.splitTree);
@@ -1288,8 +1315,9 @@ window.websessions = (function() {
       .then(function(r) {
         var sid = r.headers.get('X-Session-ID');
         var sname = r.headers.get('X-Session-Name');
+        var stype = r.headers.get('X-Session-Type');
         if (sid) {
-          openTab(sid, sname || 'terminal', 'running');
+          openTab(sid, sname || 'terminal', 'running', stype || 'terminal');
         }
         refreshSidebar();
         return r.text(); // consume body
@@ -1319,7 +1347,7 @@ window.websessions = (function() {
 
     var desc = document.createElement('p');
     desc.className = 'modal-desc';
-    desc.textContent = 'This will terminate all running and waiting Claude sessions. This action cannot be undone.';
+    desc.textContent = 'This will terminate all running and waiting provider sessions. This action cannot be undone.';
 
     var actions = document.createElement('div');
     actions.className = 'modal-actions';
@@ -1626,52 +1654,119 @@ window.websessions = (function() {
     });
   }
 
-  // Load claude sessions for a directory
-  function loadClaudeSessions(dir) {
-    if (!dir) return;
-    var section = document.getElementById('claude-sessions-section');
-    var list = document.getElementById('claude-sessions-list');
+  function selectedProvider() {
+    var providerInput = document.getElementById('provider');
+    if (!providerInput || !providerInput.value) return 'claude';
+    return providerInput.value;
+  }
+
+  function providerLabel(provider) {
+    if (provider === 'opencode') return 'OpenCode';
+    return 'Claude';
+  }
+
+  function providerFromSessionType(sessionType) {
+    if (sessionType === 'opencode') return 'opencode';
+    if (sessionType === 'claude') return 'claude';
+    return '';
+  }
+
+  function tabProvider(tab) {
+    if (!tab) return '';
+    if (tab.provider === 'opencode' || tab.provider === 'claude') return tab.provider;
+    return providerFromSessionType(tab.type);
+  }
+
+  function setProviderSessionsLabel(provider) {
+    var label = document.getElementById('provider-sessions-label');
+    if (!label) return;
+    label.textContent = 'Resume previous ' + providerLabel(provider) + ' session';
+  }
+
+  function renderProviderSessions(list, sessions) {
+    while (list.firstChild) list.removeChild(list.firstChild);
+    sessions.forEach(function(s) {
+      var div = document.createElement('div');
+      div.className = 'recent-item provider-session-item';
+      div.setAttribute('role', 'button');
+      div.setAttribute('tabindex', '0');
+
+      var externalID = s.external_session_id || s.id || '';
+      var nameSpan = document.createElement('span');
+      nameSpan.className = 'recent-name';
+      nameSpan.textContent = s.summary || (externalID ? externalID.substring(0, 8) + '...' : 'Previous session');
+
+      var metaSpan = document.createElement('span');
+      metaSpan.className = 'recent-path';
+      metaSpan.textContent = s.date + ' · ' + s.size_kb + 'KB';
+
+      div.appendChild(nameSpan);
+      div.appendChild(metaSpan);
+
+      div.addEventListener('click', function() {
+        var resumeInput = document.getElementById('resume_id');
+        if (resumeInput) resumeInput.value = externalID;
+        list.querySelectorAll('.provider-session-item').forEach(function(el) {
+          el.classList.remove('selected');
+        });
+        div.classList.add('selected');
+      });
+      list.appendChild(div);
+    });
+  }
+
+  function loadProviderSessions(dir, provider) {
+    var resolvedDir = dir || ((document.getElementById('work_dir') || {}).value || '');
+    var resolvedProvider = provider || selectedProvider();
+    var section = document.getElementById('provider-sessions-section');
+    var list = document.getElementById('provider-sessions-list');
     if (!section || !list) return;
 
-    fetch('/api/claude-sessions?dir=' + encodeURIComponent(dir))
-      .then(function(r) { return r.json(); })
+    setProviderSessionsLabel(resolvedProvider);
+
+    if (!resolvedDir) {
+      section.style.display = 'none';
+      return;
+    }
+
+    fetch('/api/provider-sessions?provider=' + encodeURIComponent(resolvedProvider) + '&work_dir=' + encodeURIComponent(resolvedDir))
+      .then(function(r) {
+        if (!r.ok) throw new Error('provider sessions unavailable');
+        return r.json();
+      })
+      .catch(function() {
+        if (resolvedProvider !== 'claude') return [];
+        return fetch('/api/claude-sessions?dir=' + encodeURIComponent(resolvedDir))
+          .then(function(r) {
+            if (!r.ok) throw new Error('claude sessions unavailable');
+            return r.json();
+          })
+          .catch(function() { return []; });
+      })
       .then(function(sessions) {
+        var resumeInput = document.getElementById('resume_id');
+        if (resumeInput) resumeInput.value = '';
         while (list.firstChild) list.removeChild(list.firstChild);
         if (!sessions || sessions.length === 0) {
           section.style.display = 'none';
           return;
         }
         section.style.display = 'block';
-        sessions.forEach(function(s) {
-          var div = document.createElement('div');
-          div.className = 'recent-item claude-session-item';
-          div.setAttribute('role', 'button');
-          div.setAttribute('tabindex', '0');
-
-          var nameSpan = document.createElement('span');
-          nameSpan.className = 'recent-name';
-          nameSpan.textContent = s.summary || s.id.substring(0, 8) + '...';
-
-          var metaSpan = document.createElement('span');
-          metaSpan.className = 'recent-path';
-          metaSpan.textContent = s.date + ' · ' + s.size_kb + 'KB';
-
-          div.appendChild(nameSpan);
-          div.appendChild(metaSpan);
-
-          div.addEventListener('click', function() {
-            // Set resume ID in hidden field
-            var resumeInput = document.getElementById('resume_id');
-            if (resumeInput) resumeInput.value = s.id;
-            // Highlight selected
-            list.querySelectorAll('.claude-session-item').forEach(function(el) {
-              el.classList.remove('selected');
-            });
-            div.classList.add('selected');
-          });
-          list.appendChild(div);
-        });
+        renderProviderSessions(list, sessions);
       });
+  }
+
+  function providerChanged(provider) {
+    var normalizedProvider = provider || selectedProvider();
+    var resumeInput = document.getElementById('resume_id');
+    if (resumeInput) resumeInput.value = '';
+    setProviderSessionsLabel(normalizedProvider);
+    loadProviderSessions(null, normalizedProvider);
+  }
+
+  // Backward-compatible wrapper used by older templates.
+  function loadClaudeSessions(dir) {
+    loadProviderSessions(dir, 'claude');
   }
 
   // Hooks management
@@ -2483,7 +2578,7 @@ window.websessions = (function() {
       return;
     }
 
-    // Ctrl+N — new Claude session
+    // Ctrl+N — new provider session
     if (ctrl && e.key === 'n') {
       e.preventDefault();
       htmx.ajax('GET', '/sessions/new', { target: '#modal', swap: 'innerHTML' });
@@ -2541,6 +2636,8 @@ window.websessions = (function() {
     checkForUpdate: checkForUpdate,
     manageService: manageService,
     settingsDirAutocomplete: settingsDirAutocomplete,
+    providerChanged: providerChanged,
+    loadProviderSessions: loadProviderSessions,
     loadClaudeSessions: loadClaudeSessions,
     selectDir: selectDir,
     quickSession: quickSession,

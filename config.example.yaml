@@ -5,6 +5,19 @@ sessions:
   scan_interval: 30s
   output_buffer_size: 10MB
   default_dir: ~/projects
+providers:
+  default: claude
+  claude:
+    command: claude
+    args: []
+  opencode:
+    command: opencode
+    args: []
 notifications:
   desktop: true
   events: [completed, errored, waiting]
+  reminder_minutes: 5
+  sound: true
+  audio_device: ""
+docker:
+  copy_credentials: true

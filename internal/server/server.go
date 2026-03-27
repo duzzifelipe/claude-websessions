@@ -7,27 +7,27 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/IgorDeo/claude-websessions/internal/config"
 	"github.com/IgorDeo/claude-websessions/internal/notification"
 	"github.com/IgorDeo/claude-websessions/internal/session"
 	"github.com/IgorDeo/claude-websessions/internal/store"
 	"github.com/IgorDeo/claude-websessions/web"
+	"github.com/go-chi/chi/v5"
 )
 
 type SnoozeFunc func(sessionID string, minutes int)
 
 type Server struct {
-	cfg       *config.Config
-	mgr       *session.Manager
-	bus       *notification.Bus
-	sink      *notification.InAppSink
-	sound     *notification.SoundSink
-	store     *store.Store
-	hub       *wsHub
-	handler   http.Handler
-	snoozeFn  SnoozeFunc
-	version   string
+	cfg      *config.Config
+	mgr      *session.Manager
+	bus      *notification.Bus
+	sink     *notification.InAppSink
+	sound    *notification.SoundSink
+	store    *store.Store
+	hub      *wsHub
+	handler  http.Handler
+	snoozeFn SnoozeFunc
+	version  string
 }
 
 func (s *Server) SetVersion(v string) { s.version = v }
@@ -80,6 +80,7 @@ func (s *Server) routes() http.Handler {
 	r.Get("/api/dirs", s.handleListDirs)
 	r.Get("/api/recent", s.handleRecentProjects)
 	r.Get("/api/sessions", s.handleListSessions)
+	r.Get("/api/provider-sessions", s.handleProviderSessions)
 	r.Get("/api/claude-sessions", s.handleClaudeSessions)
 
 	// Sessions

@@ -84,7 +84,7 @@ templ sessionItem(s SessionView, grouped bool) {
 		if s.State != "offline" {
 			<div
 				class="session-clickable"
-				onclick={ openSession(s.ID, s.Name, s.State) }
+				onclick={ openSession(s.ID, s.Name, s.State, s.Type) }
 			>
 				<span class="status-dot"></span>
 				<div class="session-info">
@@ -122,8 +122,8 @@ templ sessionItem(s SessionView, grouped bool) {
 	</div>
 }
 
-script openSession(id string, name string, state string) {
-	window.websessions.openTab(id, name, state);
+script openSession(id string, name string, state string, sessionType string) {
+	window.websessions.openTab(id, name, state, sessionType);
 }
 
 func stateClass(state string) string {

@@ -34,6 +34,7 @@ The tab bar is a horizontally-scrolling flex container (`#tab-bar`). Each tab sh
 
 - **State dot** -- colored circle reflecting session state (running, waiting, errored, completed)
 - **Tab name** -- the session name, double-click to rename inline
+- **Provider badge** -- `OC` badge for OpenCode sessions so provider tabs are visually distinct
 - **Split badge** -- number of panes, only shown when the tab has a split tree with 2+ leaves
 - **Close button** -- appears on hover, closes the tab (session keeps running)
 
@@ -43,13 +44,13 @@ The tab bar is a horizontally-scrolling flex container (`#tab-bar`). Each tab sh
 Sidebar click / API call
         |
         v
-   openTab(sessionID, name, state)
+   openTab(sessionID, name, state, sessionType)
         |
         +-- Session already in a split group? --> activate that group's tab
         |
         +-- Tab already open?
         |     yes --> just activate it (no re-fetch if DOM is intact)
-        |     no  --> push to openTabs[], save state
+        |     no  --> push to openTabs[] (including provider/type metadata), save state
         |
         +-- Tab has splitTree? --> rebuildSplitLayout()
         |

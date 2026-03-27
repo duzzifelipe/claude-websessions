@@ -87,6 +87,7 @@
   --shadow-glow: 0 0 20px rgba(74, 109, 229, 0.06);
 }
 [data-theme="light"] .type-claude { background: rgba(74, 109, 229, 0.12); color: #3a5cd4; }
+[data-theme="light"] .type-opencode { background: rgba(35, 150, 125, 0.14); color: #1d7f69; }
 [data-theme="light"] .type-terminal { background: rgba(45, 154, 45, 0.12); color: #2d9a2d; }
 [data-theme="light"] .type-discovered { background: rgba(184, 134, 11, 0.12); color: #96700a; }
 [data-theme="light"] .toast { background: var(--bg-elevated); border-color: var(--border); }
@@ -390,6 +391,7 @@ html, body {
   opacity: 0.85;
 }
 .type-claude { background: rgba(108, 140, 255, 0.2); color: #8aa8ff; }
+.type-opencode { background: rgba(75, 201, 173, 0.2); color: #6ce6c8; }
 .type-terminal { background: rgba(126, 200, 126, 0.2); color: #7ec87e; }
 .type-discovered { background: rgba(212, 168, 67, 0.2); color: #d4a843; }
 .session-dir {
@@ -609,6 +611,19 @@ html, body {
   margin-left: 0.15rem;
 }
 
+.tab-provider-badge {
+  font-size: 0.52rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #6ce6c8;
+  background: rgba(75, 201, 173, 0.18);
+  border: 1px solid rgba(75, 201, 173, 0.35);
+  border-radius: 999px;
+  padding: 0 0.28rem;
+  line-height: 1.15;
+}
+
 .new-session-btn {
   background: none; border: 1px solid var(--border);
   color: var(--text-muted); padding: 0.25rem 0.65rem;
@@ -663,7 +678,7 @@ html, body {
   font-size: 0.72rem; font-weight: 500; color: var(--text-secondary);
   text-transform: uppercase; letter-spacing: 0.04em;
 }
-.form-group input, .form-group textarea {
+.form-group input, .form-group textarea, .form-group select {
   width: 100%;
   background: var(--bg-input); border: 1px solid var(--border);
   color: var(--text-primary);
@@ -672,7 +687,7 @@ html, body {
   transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
   outline: none;
 }
-.form-group input:focus, .form-group textarea:focus {
+.form-group input:focus, .form-group textarea:focus, .form-group select:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 2px var(--accent-glow);
 }
@@ -791,7 +806,9 @@ html, body {
 .modal-divider { display: flex; align-items: center; gap: 0.75rem; margin: 1rem 0; color: var(--text-muted); font-size: 0.7rem; }
 .modal-divider::before, .modal-divider::after { content: ''; flex: 1; border-top: 1px solid var(--border); }
 .claude-sessions-section { margin-bottom: 0.75rem; }
+.provider-session-item.selected,
 .claude-session-item.selected { border-color: var(--green); background: var(--green-glow); }
+.provider-session-item.selected::before,
 .claude-session-item.selected::before { content: '\2713 '; color: var(--green); font-weight: bold; }
 
 /* Directory Autocomplete */

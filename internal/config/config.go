@@ -13,8 +13,20 @@ import (
 type Config struct {
 	Server        ServerConfig        `yaml:"server"`
 	Sessions      SessionsConfig      `yaml:"sessions"`
+	Providers     ProvidersConfig     `yaml:"providers"`
 	Notifications NotificationsConfig `yaml:"notifications"`
 	Docker        DockerConfig        `yaml:"docker"`
+}
+
+type ProvidersConfig struct {
+	Default  string         `yaml:"default"`
+	Claude   ProviderConfig `yaml:"claude"`
+	OpenCode ProviderConfig `yaml:"opencode"`
+}
+
+type ProviderConfig struct {
+	Command string   `yaml:"command"`
+	Args    []string `yaml:"args"`
 }
 
 type DockerConfig struct {
@@ -42,7 +54,6 @@ type NotificationsConfig struct {
 	AudioDevice     string   `yaml:"audio_device"`
 }
 
-
 func defaults() *Config {
 	return &Config{
 		Server: ServerConfig{Port: 8080, Host: "0.0.0.0"},
@@ -50,6 +61,11 @@ func defaults() *Config {
 			ScanInterval: 30 * time.Second, ScanIntervalRaw: "30s",
 			OutputBufferSize: 10 * 1024 * 1024, OutputBufferRaw: "10MB",
 			DefaultDir: "~/projects",
+		},
+		Providers: ProvidersConfig{
+			Default:  "claude",
+			Claude:   ProviderConfig{Command: "claude", Args: []string{}},
+			OpenCode: ProviderConfig{Command: "opencode", Args: []string{}},
 		},
 		Notifications: NotificationsConfig{Desktop: true, Sound: true, Events: []string{"completed", "errored", "waiting"}, ReminderMinutes: 5},
 		Docker:        DockerConfig{CopyCredentials: true},
@@ -89,7 +105,30 @@ func (c *Config) parseRawFields() error {
 		}
 		c.Sessions.OutputBufferSize = size
 	}
+	c.applyProviderDefaults()
 	return nil
+}
+
+func (c *Config) applyProviderDefaults() {
+	c.Providers.Default = normalizeProvider(c.Providers.Default)
+
+	c.Providers.Claude.Command = strings.TrimSpace(c.Providers.Claude.Command)
+	if c.Providers.Claude.Command == "" {
+		c.Providers.Claude.Command = "claude"
+	}
+
+	c.Providers.OpenCode.Command = strings.TrimSpace(c.Providers.OpenCode.Command)
+	if c.Providers.OpenCode.Command == "" {
+		c.Providers.OpenCode.Command = "opencode"
+	}
+}
+
+func normalizeProvider(provider string) string {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider != "claude" && provider != "opencode" {
+		return "claude"
+	}
+	return provider
 }
 
 func (c *Config) applyEnvOverrides() {

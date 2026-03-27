@@ -103,20 +103,20 @@ func NewSessionModal(defaultDir string, recentDirs []string, dockerAvailable boo
 				return templ_7745c5c3_Err
 			}
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 9, "<form id=\"new-session-form\" hx-post=\"/sessions\" hx-swap=\"none\"><input type=\"hidden\" id=\"resume_id\" name=\"resume_id\" value=\"\"><div class=\"form-group\"><label for=\"name\">Session Name</label> <input type=\"text\" id=\"name\" name=\"name\" placeholder=\"my-session\" required></div><div class=\"form-group\" style=\"position:relative;\"><label for=\"work_dir\">Working Directory</label> <input type=\"text\" id=\"work_dir\" name=\"work_dir\" value=\"")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 9, "<form id=\"new-session-form\" hx-post=\"/sessions\" hx-swap=\"none\"><input type=\"hidden\" id=\"resume_id\" name=\"resume_id\" value=\"\"><div class=\"form-group\"><label for=\"provider\">Provider</label> <select id=\"provider\" name=\"provider\" onchange=\"window.websessions.providerChanged(this.value)\"><option value=\"claude\" selected>Claude</option> <option value=\"opencode\">OpenCode</option></select></div><div class=\"form-group\"><label for=\"name\">Session Name</label> <input type=\"text\" id=\"name\" name=\"name\" placeholder=\"my-session\" required></div><div class=\"form-group\" style=\"position:relative;\"><label for=\"work_dir\">Working Directory</label> <input type=\"text\" id=\"work_dir\" name=\"work_dir\" value=\"")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		var templ_7745c5c3_Var6 string
 		templ_7745c5c3_Var6, templ_7745c5c3_Err = templ.JoinStringErrs(defaultDir)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `web/templates/newsession.templ`, Line: 40, Col: 72}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `web/templates/newsession.templ`, Line: 47, Col: 72}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var6))
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 10, "\" required autocomplete=\"off\" oninput=\"window.websessions.dirAutocomplete(this)\" onchange=\"window.websessions.loadClaudeSessions(this.value)\"><div id=\"dir-suggestions\" class=\"dir-suggestions\"></div></div><div id=\"claude-sessions-section\" class=\"claude-sessions-section\" style=\"display:none;\"><label class=\"recent-label\">Resume previous Claude session</label><div id=\"claude-sessions-list\" class=\"recent-list\"></div></div><div class=\"form-group\"><label for=\"prompt\">Initial Prompt (optional)</label> <textarea id=\"prompt\" name=\"prompt\" rows=\"3\" placeholder=\"What should Claude work on?\"></textarea></div><div class=\"form-group\"><label style=\"display:flex; align-items:center; gap:0.5rem; cursor:pointer; font-size:0.8rem; color:var(--text-secondary); font-weight:500;\">")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 10, "\" required autocomplete=\"off\" oninput=\"window.websessions.dirAutocomplete(this)\" onchange=\"window.websessions.loadProviderSessions()\"><div id=\"dir-suggestions\" class=\"dir-suggestions\"></div></div><div id=\"provider-sessions-section\" class=\"claude-sessions-section\" style=\"display:none;\"><label class=\"recent-label\" id=\"provider-sessions-label\">Resume previous session</label><div id=\"provider-sessions-list\" class=\"recent-list\"></div></div><div class=\"form-group\"><label for=\"prompt\">Initial Prompt (optional)</label> <textarea id=\"prompt\" name=\"prompt\" rows=\"3\" placeholder=\"What should the assistant work on?\"></textarea></div><div class=\"form-group\"><label style=\"display:flex; align-items:center; gap:0.5rem; cursor:pointer; font-size:0.8rem; color:var(--text-secondary); font-weight:500;\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}

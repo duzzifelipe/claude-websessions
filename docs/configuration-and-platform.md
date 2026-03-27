@@ -16,9 +16,18 @@ server:
   host: "0.0.0.0"             # Bind address ("0.0.0.0" = all interfaces)
 
 sessions:
-  scan_interval: "30s"        # How often to scan for new Claude processes
+  scan_interval: "30s"        # How often to scan for new external provider processes
   output_buffer_size: "10MB"  # Per-session ring buffer for terminal output
   default_dir: "~/projects"   # Default working directory for new sessions
+
+providers:
+  default: claude              # Allowed: claude, opencode (invalid values fallback to claude)
+  claude:
+    command: claude            # Fallback if empty: "claude"
+    args: []                   # Reserved for provider defaults
+  opencode:
+    command: opencode          # Fallback if empty: "opencode"
+    args: []                   # Reserved for provider defaults
 
 notifications:
   desktop: true               # Enable native OS notifications
@@ -43,12 +52,19 @@ docker:
 | `sessions.scan_interval` | `scan_interval` | `30s` | Discovery scan interval (Go duration) |
 | `sessions.output_buffer_size` | `output_buffer_size` | `10MB` | Ring buffer per session (supports KB, MB, GB) |
 | `sessions.default_dir` | `default_dir` | `~/projects` | Pre-filled working directory in "New Session" |
+| `providers.default` | `default` | `claude` | Normalized to `claude`/`opencode`; invalid values fallback to `claude` |
+| `providers.claude.command` | `command` | `claude` | Claude provider executable; empty values fallback to default |
+| `providers.claude.args` | `args` | `[]` | Reserved provider arg defaults (parsed from YAML) |
+| `providers.opencode.command` | `command` | `opencode` | OpenCode provider executable; empty values fallback to default |
+| `providers.opencode.args` | `args` | `[]` | Reserved provider arg defaults (parsed from YAML) |
 | `notifications.desktop` | `desktop` | `true` | OS-level notifications (notify-send / osascript) |
 | `notifications.sound` | `sound` | `true` | Server-side audio (paplay / afplay) |
 | `notifications.audio_device` | `audio_device` | `""` | PulseAudio sink name or empty for default |
 | `notifications.events` | `events` | `[completed, errored, waiting]` | Event types that fire notifications |
 | `notifications.reminder_minutes` | `reminder_minutes` | `5` | Minutes between reminder pings for waiting sessions |
 | `docker.copy_credentials` | `copy_credentials` | `true` | Auto-copy Claude creds into Docker sandboxes |
+
+Provider config is loaded and normalized by `internal/config`. Session launch still resolves to `claude`/`opencode` command names in manager/handler logic; provider `args` are not auto-applied yet.
 
 ### Byte Size Parsing
 
@@ -105,7 +121,9 @@ If `--config` is not specified, the server checks for `~/.websessions/config.yam
 
 ## Settings UI
 
-The Settings page (`/settings`) exposes all configuration options in a single form plus several integration panels.
+The Settings page (`/settings`) exposes runtime server/session/notification options in a single form plus several integration panels.
+
+Provider config (`providers.default`, `providers.*.command`, `providers.*.args`) is currently file-driven (`config.yaml`) and not editable from the Settings UI.
 
 ### What Can Be Changed at Runtime vs Requires Restart
 
@@ -190,7 +208,9 @@ sessions
 +-------------+-----------+-----------------------------------------------+
 | id          | TEXT PK   | Session ID (e.g., "sess-abc", "discovered-42")|
 | name        | TEXT      | Display name                                  |
-| claude_id   | TEXT      | Claude session ID (for --resume)              |
+| provider    | TEXT      | Provider name (`claude`, `opencode`, or empty legacy row) |
+| external_session_id | TEXT | Provider session ID used for resume/takeover |
+| claude_id   | TEXT      | Claude session ID (legacy/claude compatibility field) |
 | work_dir    | TEXT      | Working directory path                        |
 | start_time  | DATETIME  | When the session started                      |
 | end_time    | DATETIME  | When the session ended (if applicable)        |
@@ -250,7 +270,7 @@ The API endpoints for preferences:
 On startup, `store.Open()` runs `migrate()` which:
 
 1. Creates all four tables with `CREATE TABLE IF NOT EXISTS`
-2. Runs `ALTER TABLE` migrations for columns added after initial schema (name, sandboxed, sandbox_name) -- these silently succeed or fail if already present
+2. Runs `ALTER TABLE` migrations for columns added after initial schema (name, sandboxed, sandbox_name, provider, external_session_id) -- these silently succeed or fail if already present
 3. Enables WAL journal mode for concurrent read/write performance
 
 ---
@@ -701,8 +721,8 @@ The `main()` function wires all components in this order:
      (reattach to surviving tmux sessions from previous run)
  14. Restore offline sessions from SQLite history
      (running/waiting/created, skip discovered/killed/completed)
- 15. Initial discovery scan (synchronous)
-     (scan for external Claude processes, add as discovered)
+  15. Initial discovery scan (synchronous)
+      (scan for external provider processes, add as discovered)
  16. Start background discovery ticker (if scan_interval > 0)
  17. Start auto-cleanup ticker (remove stale completed/errored after 5 min)
  18. Start waiting reminder ticker (if reminder_minutes > 0)

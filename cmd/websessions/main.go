@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -19,7 +20,6 @@ import (
 	"github.com/IgorDeo/claude-websessions/internal/session"
 	"github.com/IgorDeo/claude-websessions/internal/store"
 )
-
 
 var version = "dev"
 
@@ -74,12 +74,48 @@ func printOffline(count int) {
 	}
 }
 
+func providerWorkDirKey(provider, workDir string) string {
+	provider = strings.TrimSpace(strings.ToLower(provider))
+	if provider == "" {
+		provider = "claude"
+	}
+	return provider + "::" + workDir
+}
+
 func printShutdown() {
 	fmt.Fprintf(os.Stderr, "\n  %s%s⏻ Shutting down gracefully...%s\n", colorYellow, colorBold, colorReset)
 }
 
 func printStopped() {
 	fmt.Fprintf(os.Stderr, "  %s%s✓ All sessions saved. Goodbye!%s\n\n", colorGreen, colorBold, colorReset)
+}
+
+type snoozeSessions struct {
+	mu   sync.RWMutex
+	data map[string]time.Time
+}
+
+func newSnoozeSessions() *snoozeSessions {
+	return &snoozeSessions{data: make(map[string]time.Time)}
+}
+
+func (s *snoozeSessions) Set(sessionID string, until time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.data[sessionID] = until
+}
+
+func (s *snoozeSessions) Delete(sessionID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.data, sessionID)
+}
+
+func (s *snoozeSessions) IsSnoozed(sessionID string, now time.Time) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	until, ok := s.data[sessionID]
+	return ok && now.Before(until)
 }
 
 func isProcessAlive(pid int) bool {
@@ -89,6 +125,31 @@ func isProcessAlive(pid int) bool {
 	}
 	err = proc.Signal(syscall.Signal(0))
 	return err == nil
+}
+
+func isClaudeProvider(provider string) bool {
+	provider = strings.TrimSpace(strings.ToLower(provider))
+	return provider == "" || provider == "claude"
+}
+
+func storedClaudeIDForProvider(provider, claudeID string) string {
+	if !isClaudeProvider(provider) {
+		return ""
+	}
+	return strings.TrimSpace(claudeID)
+}
+
+func offlineRestoreCreateOptions(rec store.SessionRecord) *session.CreateOptions {
+	provider := strings.TrimSpace(strings.ToLower(rec.Provider))
+	claudeProvider := isClaudeProvider(provider)
+	if provider == "" {
+		provider = "claude"
+	}
+	externalSessionID := strings.TrimSpace(rec.ExternalSessionID)
+	if claudeProvider && externalSessionID == "" {
+		externalSessionID = strings.TrimSpace(rec.ClaudeID)
+	}
+	return &session.CreateOptions{Provider: provider, ExternalSessionID: externalSessionID}
 }
 
 func main() {
@@ -159,16 +220,21 @@ func main() {
 	sink := notification.NewInAppSink(100)
 
 	mgr.OnStateChange(func(s *session.Session, from, to session.State) {
+		claudeProvider := isClaudeProvider(s.Provider)
+
 		// Resolve claude session ID if not known yet (for future --resume)
-		if s.ClaudeID == "" && s.WorkDir != "" {
+		if claudeProvider && s.ClaudeID == "" && s.WorkDir != "" {
 			s.ClaudeID = discovery.ResolveClaudeSessionID(s.WorkDir)
 		}
+
+		storedClaudeID := storedClaudeIDForProvider(s.Provider, s.ClaudeID)
 
 		// Skip notification for intentionally killed sessions
 		if s.Killed && to == session.StateErrored {
 			// Still save to DB but don't notify
 			_ = st.SaveSession(store.SessionRecord{
-				ID: s.ID, Name: s.Name, ClaudeID: s.ClaudeID, WorkDir: s.WorkDir,
+				ID: s.ID, Name: s.Name, Provider: s.Provider, ExternalSessionID: s.ExternalSessionID,
+				ClaudeID: storedClaudeID, WorkDir: s.WorkDir,
 				StartTime: s.StartTime, EndTime: s.EndTime,
 				ExitCode: s.ExitCode, Status: "killed", PID: s.PID,
 				Sandboxed: s.Sandboxed, SandboxName: s.SandboxName,
@@ -190,7 +256,8 @@ func main() {
 		event := notification.SessionEvent{SessionID: s.ID, Type: eventType, Timestamp: time.Now()}
 		bus.Publish(event)
 		_ = st.SaveSession(store.SessionRecord{
-			ID: s.ID, Name: s.Name, ClaudeID: s.ClaudeID, WorkDir: s.WorkDir,
+			ID: s.ID, Name: s.Name, Provider: s.Provider, ExternalSessionID: s.ExternalSessionID,
+			ClaudeID: storedClaudeID, WorkDir: s.WorkDir,
 			StartTime: s.StartTime, EndTime: s.EndTime,
 			ExitCode: s.ExitCode, Status: string(to), PID: s.PID,
 			Sandboxed: s.Sandboxed, SandboxName: s.SandboxName,
@@ -235,7 +302,7 @@ func main() {
 			if name == "" {
 				name = rec.ID
 			}
-			mgr.AddOffline(rec.ID, name, rec.ClaudeID, rec.WorkDir)
+			mgr.AddOffline(rec.ID, name, rec.ClaudeID, rec.WorkDir, offlineRestoreCreateOptions(rec))
 			offlineCount++
 		}
 	}
@@ -253,20 +320,24 @@ func main() {
 				existingPIDs[s.PID] = true
 			}
 			if s.WorkDir != "" && s.Owned {
-				existingDirs[s.WorkDir] = true
+				existingDirs[providerWorkDirKey(s.Provider, s.WorkDir)] = true
 			}
 		}
 		for _, p := range processes {
 			if existingPIDs[p.PID] {
 				continue
 			}
-			if p.WorkDir != "" && existingDirs[p.WorkDir] {
+			if p.WorkDir != "" && existingDirs[providerWorkDirKey(p.Provider, p.WorkDir)] {
 				continue
 			}
 			id := fmt.Sprintf("discovered-%d", p.PID)
-			s := mgr.AddDiscovered(id, p.ClaudeID, p.WorkDir, p.PID, p.StartTime)
+			s := mgr.AddDiscovered(id, p.ClaudeID, p.WorkDir, p.PID, p.StartTime, &session.CreateOptions{
+				Provider:          p.Provider,
+				ExternalSessionID: p.ExternalSessionID,
+			})
 			_ = st.SaveSession(store.SessionRecord{
-				ID: id, Name: s.Name, ClaudeID: p.ClaudeID, WorkDir: p.WorkDir,
+				ID: id, Name: s.Name, Provider: s.Provider, ExternalSessionID: s.ExternalSessionID,
+				ClaudeID: p.ClaudeID, WorkDir: p.WorkDir,
 				StartTime: p.StartTime, Status: "discovered", PID: p.PID,
 			})
 			discoveredCount++
@@ -287,7 +358,8 @@ func main() {
 					if s.PID > 0 && !isProcessAlive(s.PID) {
 						slog.Info("discovered session process died, removing", "id", s.ID, "pid", s.PID)
 						_ = st.SaveSession(store.SessionRecord{
-							ID: s.ID, Name: s.Name, ClaudeID: s.ClaudeID, WorkDir: s.WorkDir,
+							ID: s.ID, Name: s.Name, Provider: s.Provider, ExternalSessionID: s.ExternalSessionID,
+							ClaudeID: s.ClaudeID, WorkDir: s.WorkDir,
 							StartTime: s.StartTime, EndTime: time.Now(),
 							Status: "completed", PID: s.PID,
 						})
@@ -310,7 +382,7 @@ func main() {
 						existingPIDs[s.PID] = true
 					}
 					if s.WorkDir != "" && s.Owned {
-						existingDirs[s.WorkDir] = true
+						existingDirs[providerWorkDirKey(s.Provider, s.WorkDir)] = true
 					}
 				}
 
@@ -319,16 +391,20 @@ func main() {
 						continue
 					}
 					// Skip if an owned session already manages this directory
-					if p.WorkDir != "" && existingDirs[p.WorkDir] {
+					if p.WorkDir != "" && existingDirs[providerWorkDirKey(p.Provider, p.WorkDir)] {
 						continue
 					}
 					id := fmt.Sprintf("discovered-%d", p.PID)
-					s := mgr.AddDiscovered(id, p.ClaudeID, p.WorkDir, p.PID, p.StartTime)
+					s := mgr.AddDiscovered(id, p.ClaudeID, p.WorkDir, p.PID, p.StartTime, &session.CreateOptions{
+						Provider:          p.Provider,
+						ExternalSessionID: p.ExternalSessionID,
+					})
 					_ = st.SaveSession(store.SessionRecord{
-						ID: id, Name: s.Name, ClaudeID: p.ClaudeID, WorkDir: p.WorkDir,
+						ID: id, Name: s.Name, Provider: s.Provider, ExternalSessionID: s.ExternalSessionID,
+						ClaudeID: p.ClaudeID, WorkDir: p.WorkDir,
 						StartTime: p.StartTime, Status: "discovered", PID: p.PID,
 					})
-					slog.Info("discovered new claude session", "pid", p.PID)
+					slog.Info("discovered new external session", "pid", p.PID, "provider", p.Provider)
 				}
 			}
 		}()
@@ -352,7 +428,7 @@ func main() {
 	}()
 
 	// Waiting session reminder — re-notifies if a session stays in waiting state
-	snoozedSessions := make(map[string]time.Time) // session ID -> snooze until
+	snoozedSessions := newSnoozeSessions()
 	if cfg.Notifications.ReminderMinutes > 0 {
 		reminderInterval := time.Duration(cfg.Notifications.ReminderMinutes) * time.Minute
 		go func() {
@@ -362,21 +438,22 @@ func main() {
 				for _, s := range mgr.List() {
 					if s.GetState() != session.StateWaiting {
 						// Clear snooze when session is no longer waiting
-						delete(snoozedSessions, s.ID)
+						snoozedSessions.Delete(s.ID)
 						continue
 					}
 					// Check if snoozed
-					if until, ok := snoozedSessions[s.ID]; ok && time.Now().Before(until) {
+					now := time.Now()
+					if snoozedSessions.IsSnoozed(s.ID, now) {
 						continue
 					}
 					// Check if waiting long enough
 					// Use last state change time approximation: if session is waiting
 					// and we haven't reminded recently, fire a reminder
-					snoozedSessions[s.ID] = time.Now().Add(reminderInterval)
+					snoozedSessions.Set(s.ID, now.Add(reminderInterval))
 					event := notification.SessionEvent{
 						SessionID: s.ID,
 						Type:      notification.EventWaiting,
-						Timestamp: time.Now(),
+						Timestamp: now,
 						Message:   s.Name + " is still waiting for your input",
 					}
 					bus.Publish(event)
@@ -384,7 +461,7 @@ func main() {
 						_ = st.SaveNotification(store.NotificationRecord{
 							SessionID: s.ID,
 							EventType: "waiting",
-							Timestamp: time.Now(),
+							Timestamp: now,
 						})
 					}
 				}
@@ -397,7 +474,7 @@ func main() {
 
 	// Expose snooze function to the server for the snooze API
 	srv.SetSnoozeFunc(func(sessionID string, minutes int) {
-		snoozedSessions[sessionID] = time.Now().Add(time.Duration(minutes) * time.Minute)
+		snoozedSessions.Set(sessionID, time.Now().Add(time.Duration(minutes)*time.Minute))
 	})
 
 	httpServer := &http.Server{Addr: srv.Addr(), Handler: srv.Handler()}
@@ -434,7 +511,8 @@ func main() {
 			}
 		}
 		_ = st.SaveSession(store.SessionRecord{
-			ID: s.ID, Name: s.Name, ClaudeID: s.ClaudeID, WorkDir: s.WorkDir,
+			ID: s.ID, Name: s.Name, Provider: s.Provider, ExternalSessionID: s.ExternalSessionID,
+			ClaudeID: storedClaudeIDForProvider(s.Provider, s.ClaudeID), WorkDir: s.WorkDir,
 			StartTime: s.StartTime, EndTime: s.EndTime,
 			ExitCode: s.ExitCode, Status: string(s.GetState()), PID: s.PID,
 			Sandboxed: s.Sandboxed, SandboxName: s.SandboxName,

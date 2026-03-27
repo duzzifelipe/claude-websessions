@@ -2,7 +2,7 @@
 
 ## Overview
 
-The session lifecycle system manages the complete lifetime of Claude Code and terminal sessions within websessions. It handles session creation, state transitions, output streaming, tmux integration, process discovery, takeover of external processes, and graceful shutdown with offline recovery.
+The session lifecycle system manages the complete lifetime of provider-backed sessions (`claude`, `opencode`) and terminal sessions within websessions. It handles session creation, state transitions, output streaming, tmux integration, process discovery, takeover of external processes, and graceful shutdown with offline recovery.
 
 All sessions run inside tmux, which provides process persistence independent of the websessions server. This means sessions survive server restarts and can be reattached automatically.
 
@@ -14,27 +14,34 @@ Sessions enter the system through five distinct paths depending on their origin:
 
 | Type | ID Pattern | Owned | How Created |
 |------|-----------|-------|-------------|
-| **claude** | User-provided name (e.g. `myproject`) | Yes | User clicks "New Session" in UI, runs `claude` CLI inside tmux |
+| **claude/opencode** | User-provided name (e.g. `myproject`) | Yes | User clicks "New Session" in UI, chooses provider, runs provider CLI inside tmux |
 | **terminal** | `term-{timestamp}` | Yes | User clicks "New Terminal", runs user's `$SHELL` inside tmux |
-| **discovered** | `discovered-{pid}` | No | Process scanner finds running `claude` processes via `/proc` or `ps` |
+| **discovered** | `discovered-{pid}` | No | Process scanner finds running supported provider processes via `/proc` or `ps` |
 | **external** | `external-{basename}` | No | Claude Code hook fires from a standalone CLI session (via `/api/hook`) |
 | **offline** | Original session ID | No | Loaded from SQLite on server restart for sessions that were running |
 
-### Claude Sessions
+### Provider Sessions
 
-Created through `POST /sessions/new` with a name, working directory, and optional prompt or resume ID. The handler calls `manager.Create()` which resolves the `claude` binary, creates a tmux session, and starts streaming output.
+Created through `POST /sessions` with a name, working directory, provider (`claude` or `opencode`), and optional prompt or resume ID. The handler validates/coerces provider metadata before calling `manager.Create()`.
+
+Provider-specific creation args:
+
+| Provider | Session args built by handler/manager |
+|----------|---------------------------------------|
+| `claude` | `--name <name>` and optional `--resume <id>` |
+| `opencode` | optional `--session <id>` (drops `--name` and converts `--resume` to `--session`) |
 
 ### Terminal Sessions
 
-Created through `POST /terminal/new`. Uses the user's `$SHELL` (defaults to `/bin/zsh` on macOS, `/bin/bash` on Linux). Named sequentially: "Terminal 1", "Terminal 2", etc.
+Created through `POST /sessions/terminal`. Uses the user's `$SHELL` (defaults to `/bin/zsh` on macOS, `/bin/bash` on Linux). Named sequentially: "Terminal 1", "Terminal 2", etc.
 
 ### Discovered Sessions
 
-The process scanner (`internal/discovery`) runs on a configurable interval (default 30s). It scans for running `claude` processes, deduplicates against already-tracked sessions by PID and working directory, and adds new ones in `StateDiscovered`. Dead discovered processes are removed on the next scan tick.
+The process scanner (`internal/discovery`) runs on a configurable interval (default 30s). It scans for running supported provider processes (`claude`, `opencode`), deduplicates against already-tracked sessions by PID and provider+working-directory, and adds new ones in `StateDiscovered`. Dead discovered processes are removed on the next scan tick.
 
 ### Offline Sessions
 
-On server startup, websessions loads the last 50 session records from SQLite. Sessions that were in `running`, `waiting`, or `created` state (and not `discovered-*` prefixed) are added as offline placeholders. These can be restarted with `--resume` to pick up where they left off.
+On server startup, websessions loads the last 50 session records from SQLite. Sessions that were in `running`, `waiting`, or `created` state (and not `discovered-*` prefixed) are added as offline placeholders. These can be restarted with provider-specific resume args (`--resume` for Claude, `--session` for OpenCode).
 
 ---
 
@@ -44,7 +51,7 @@ On server startup, websessions loads the last 50 session records from SQLite. Se
 
 | State | Description |
 |-------|-------------|
-| `discovered` | External claude process found by scanner; not yet managed |
+| `discovered` | External provider process found by scanner; not yet managed |
 | `takeover` | Transitional: external process being killed for takeover |
 | `created` | Session object exists but process not yet started |
 | `starting` | Sandbox provisioning in progress (Docker sessions only) |
@@ -132,14 +139,15 @@ When a pattern matches and the session is in `running` state, it transitions to 
 handleCreateSession (HTTP POST)
         |
         v
-manager.Create(id, workDir, "claude", args)
+manager.Create(id, workDir, providerCommand, args, &CreateOptions{Provider: provider, ExternalSessionID: resumeID})
         |
         |-- 1. Expand ~ in workDir
         |-- 2. Validate directory exists
-        |-- 3. exec.LookPath("claude") to resolve binary
-        |-- 4. TmuxSessionName(id) -> "ws-{id}"
-        |-- 5. Kill any existing tmux session with that name
-        |-- 6. tmuxCreateSession(name, workDir, cmd, args)
+        |-- 3. Resolve provider command+args (`claude` or `opencode`)
+        |-- 4. exec.LookPath(providerCommand) to resolve binary
+        |-- 5. TmuxSessionName(id) -> "ws-{id}"
+        |-- 6. Kill any existing tmux session with that name
+        |-- 7. tmuxCreateSession(name, workDir, cmd, args)
         |       |
         |       |-- tmux new-session -d -s ws-{id} -x 200 -y 50 -c {workDir}
         |       |-- tmux set-option status off
@@ -147,9 +155,9 @@ manager.Create(id, workDir, "claude", args)
         |       |-- tmux set-option default-terminal xterm-256color
         |       |-- tmux set-window-option aggressive-resize on
         |       v
-        |-- 7. Build Session{State: running, Owned: true}
-        |-- 8. Fire onStateChange(created -> running)
-        |-- 9. startReader(session)
+        |-- 8. Build Session{Provider, ExternalSessionID, ClaudeID?, State: running, Owned: true}
+        |-- 9. Fire onStateChange(created -> running)
+        |-- 10. startReader(session)
         |
         v
    Return session to handler
@@ -164,7 +172,7 @@ manager.Create(id, workDir, "claude", args)
 handleCreateSession (HTTP POST, sandbox=true)
         |
         v
-manager.Create(id, workDir, "claude", args, &CreateOptions{Sandboxed: true})
+manager.Create(id, workDir, providerCommand, args, &CreateOptions{Sandboxed: true, Provider: provider, ExternalSessionID: resumeID})
         |
         |-- 1. Build Session{State: starting, Sandboxed: true}
         |-- 2. Fire onStateChange(created -> starting)
@@ -304,7 +312,7 @@ Terminal responses (device attribute queries from xterm.js) are filtered out to 
 
 Tmux provides three critical capabilities:
 
-1. **Process persistence** -- Sessions survive server restarts. The Claude CLI continues running inside tmux even when websessions is stopped and restarted.
+1. **Process persistence** -- Sessions survive server restarts. The provider CLI continues running inside tmux even when websessions is stopped and restarted.
 2. **Output multiplexing** -- Multiple browser tabs/clients can view the same session. The reader attaches in read-only mode while the original process runs independently.
 3. **Resize isolation** -- The tmux window size can be adjusted independently via `resize-window`, and the reader PTY is resized separately for proper terminal rendering.
 
@@ -353,10 +361,11 @@ RecoverTmuxSessions()
      |     |
      |     |-- Extract ID: strip "ws-" prefix
      |     |-- Get workDir: tmux display-message "#{pane_current_path}"
-     |     |-- Resolve claudeID from workDir
+     |     |-- Recover provider + external session ID from pane start command
+     |     |-- For recovered claude sessions, resolve claudeID from workDir fallback
      |     |
      |     v
-     |   Reattach(id, name, claudeID, workDir, tmuxName)
+     |   Reattach(id, name, recoveredClaudeID, workDir, tmuxName, CreateOptions{Provider, ExternalSessionID})
      |     |
      |     |-- Create Session{State: running, Owned: true}
      |     |-- startReader() to resume output streaming
@@ -411,13 +420,13 @@ handleRestartSession (HTTP POST)
 manager.Restart(sessionID)
         |
         |-- Get session, verify state == offline
-        |-- Save name, workDir, claudeID, sandboxed flag
-        |-- Resolve claudeID if not set
+        |-- Save name, workDir, provider, externalSessionID, sandboxed flag
+        |-- For provider=claude only: resolve session ID from project files if missing
         |-- manager.Remove(old session)
         |
         v
-manager.Create(id, workDir, "claude",
-    ["--name", name, "--resume", claudeID])
+manager.Create(id, workDir, providerCommand, providerResumeArgs,
+    &CreateOptions{Provider: provider, ExternalSessionID: externalSessionID})
         |
         (follows standard or sandbox creation path)
         |
@@ -431,27 +440,27 @@ If session not in memory (already cleaned up):
         v
 Fallback: load from SQLite history
         |-- Find matching record
-        |-- Build args with --resume if claudeID available
+        |-- Build provider-specific resume args (`--resume` for claude, `--session` for opencode)
         |-- Preserve sandbox flag from history record
         |
         v
-manager.Create(sessionID, rec.WorkDir, "claude", args, opts)
+manager.Create(sessionID, rec.WorkDir, providerCommand, args, opts)
 ```
 
-The `--resume` flag tells Claude CLI to continue an existing conversation rather than starting fresh.
+Resume behavior is provider-aware: Claude uses `--resume`, OpenCode uses `--session`.
 
 ---
 
 ## Takeover Flow
 
-Takeover converts a discovered (externally-running) Claude process into a managed session:
+Takeover converts a discovered (externally-running) provider process into a managed session:
 
 ```
 handleTakeover (HTTP POST)
         |
         |-- Verify session state == discovered
-        |-- Save claudeID, workDir, PID, name
-        |-- Resolve claudeID if not already known
+        |-- Save provider, externalSessionID, workDir, PID, name
+        |-- For provider=claude only: resolve session ID from project files if missing
         |
         v
 discovery.KillProcess(pid, 5s timeout)
@@ -464,18 +473,18 @@ discovery.KillProcess(pid, 5s timeout)
 manager.Remove(sessionID)  -- remove discovered placeholder
         |
         v
-manager.Create(sessionID, workDir, "claude",
-    ["--name", name, "--resume", claudeID])
+manager.Create(sessionID, workDir, providerCommand,
+    providerResumeArgs, &CreateOptions{Provider: provider, ExternalSessionID: externalSessionID})
         |
-        |-- Creates tmux session with --resume flag
-        |-- Claude CLI picks up the conversation where
-        |   the external process left off
+        |-- Creates tmux session with provider-specific resume args
+        |-- Provider CLI picks up the conversation where possible
+        |   when an external session ID is known
         |
         v
 Return terminal view to browser (auto-opens session)
 ```
 
-The key insight: Claude Code stores conversation state on disk keyed by a session ID. By killing the external process and launching a new one with `--resume`, websessions seamlessly takes over the conversation.
+The key insight: websessions preserves provider/session metadata and relaunches with provider-appropriate resume flags after killing the external process.
 
 ---
 
@@ -531,8 +540,8 @@ Server main() starts
         |
         v
 3. Initial discovery scan
-   |-- discovery.Scan() for running claude processes
-   |-- Deduplicate by PID and workDir against steps 1+2
+   |-- discovery.Scan() for running provider processes
+   |-- Deduplicate by PID and provider+workDir against steps 1+2
    |-- AddDiscovered() for new processes
    |-- Result: K discovered sessions
         |
@@ -547,7 +556,7 @@ Server main() starts
 | Scenario | Result |
 |----------|--------|
 | tmux session still alive | Reattached as `running`, output streaming resumes |
-| tmux gone, was `running` in DB | Added as `offline`, user can restart with `--resume` |
+| tmux gone, was `running` in DB | Added as `offline`, user can restart with provider resume args |
 | tmux gone, was `killed`/`completed`/`errored` | Not restored (terminal state) |
 | External process still running | Added as `discovered`, user can take over |
 
@@ -584,21 +593,23 @@ Tmux sessions are intentionally NOT killed on shutdown. They continue running so
 type Session struct {
     mu sync.RWMutex
 
-    ID           string     // Unique identifier (user-provided or generated)
-    ClaudeID     string     // Claude conversation session ID (for --resume)
-    Name         string     // Display name (shown in sidebar)
-    WorkDir      string     // Working directory
-    State        State      // Current state (see state machine)
-    PID          int        // OS process ID (for discovered sessions)
-    StartTime    time.Time  // When session was created
-    EndTime      time.Time  // When session ended (completed/errored)
-    ExitCode     int        // Process exit code
-    Error        string     // Error message (if errored)
-    Owned        bool       // true = created by websessions; false = discovered/offline
-    Killed       bool       // true = intentionally killed by user (suppresses notification)
-    TmuxSession  string     // tmux session name (e.g. "ws-myproject")
-    Sandboxed    bool       // Running inside Docker Desktop sandbox VM
-    SandboxName  string     // Docker sandbox name (e.g. "claude-myproject")
+    ID                string     // Unique identifier (user-provided or generated)
+    Provider          string     // "claude" or "opencode"
+    ExternalSessionID string     // Provider session ID used for resume/takeover
+    ClaudeID          string     // Claude conversation session ID (legacy/claude-specific)
+    Name              string     // Display name (shown in sidebar)
+    WorkDir           string     // Working directory
+    State             State      // Current state (see state machine)
+    PID               int        // OS process ID (for discovered sessions)
+    StartTime         time.Time  // When session was created
+    EndTime           time.Time  // When session ended (completed/errored)
+    ExitCode          int        // Process exit code
+    Error             string     // Error message (if errored)
+    Owned             bool       // true = created by websessions; false = discovered/offline
+    Killed            bool       // true = intentionally killed by user (suppresses notification)
+    TmuxSession       string     // tmux session name (e.g. "ws-myproject")
+    Sandboxed         bool       // Running inside Docker Desktop sandbox VM
+    SandboxName       string     // Docker sandbox name (e.g. "claude-myproject")
 
     readerPTY *os.File      // PTY fd for tmux attach reader (used for resize)
     output    *RingBuf      // Circular output buffer
@@ -626,7 +637,7 @@ type OutputFunc func(sessionID string, data []byte)
 ```
 
 The `onStateChange` callback wired in `main.go` handles:
-- Resolving `ClaudeID` if not yet known
+- Resolving `ClaudeID` for claude-provider sessions when not yet known
 - Publishing notification events to the bus
 - Persisting session state to SQLite
 - Skipping notifications for intentionally killed sessions
@@ -654,11 +665,17 @@ Relevant settings in `~/.websessions/config.yaml`:
 
 ```yaml
 sessions:
-  scan_interval: "30s"           # How often to scan for external claude processes
-                                 # Set to 0 to disable discovery scanning
+  scan_interval: "30s"           # How often to scan for external provider processes
+                                  # Set to 0 to disable discovery scanning
   output_buffer_size: "10MB"     # Ring buffer size per session
-                                 # Determines how much scrollback new clients see
+                                  # Determines how much scrollback new clients see
   default_dir: "~/projects"      # Default working directory for new sessions
+providers:
+  default: claude
+  claude:
+    command: claude
+  opencode:
+    command: opencode
 ```
 
 | Setting | Default | Description |
@@ -666,3 +683,16 @@ sessions:
 | `scan_interval` | `30s` | Discovery scan frequency. Also controls health-check of discovered processes. |
 | `output_buffer_size` | `10MB` | Per-session circular buffer. Larger values retain more scrollback but use more memory. |
 | `default_dir` | `~/projects` | Pre-filled directory in the new session dialog. |
+| `providers.default` | `claude` | Default provider value in config (currently parsed/validated but not yet used by session creation UI). |
+
+---
+
+## Manual Smoke Checklist
+
+Use this quick checklist after provider-related changes:
+
+1. Create a Claude session from the New Session modal and verify the sidebar type badge shows `claude`.
+2. Create an OpenCode session from the same modal and verify the sidebar/tab show OpenCode labeling (`opencode` / `OC`).
+3. Restart one Claude session and one OpenCode session from history/offline state and confirm provider-specific resume args are used (`--resume` for Claude, `--session` for OpenCode).
+4. Run takeover for discovered provider sessions and confirm replacement sessions keep the original provider metadata.
+5. Verify `/api/provider-sessions` returns provider-filtered resume candidates and `/api/claude-sessions` compatibility route still works.

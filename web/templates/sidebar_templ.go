@@ -298,7 +298,7 @@ func sessionItem(s SessionView, grouped bool) templ.Component {
 			}
 		}
 		if s.State != "offline" {
-			templ_7745c5c3_Err = templ.RenderScriptItems(ctx, templ_7745c5c3_Buffer, openSession(s.ID, s.Name, s.State))
+			templ_7745c5c3_Err = templ.RenderScriptItems(ctx, templ_7745c5c3_Buffer, openSession(s.ID, s.Name, s.State, s.Type))
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
@@ -306,7 +306,7 @@ func sessionItem(s SessionView, grouped bool) templ.Component {
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
 			}
-			var templ_7745c5c3_Var16 templ.ComponentScript = openSession(s.ID, s.Name, s.State)
+			var templ_7745c5c3_Var16 templ.ComponentScript = openSession(s.ID, s.Name, s.State, s.Type)
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var16.Call)
 			if templ_7745c5c3_Err != nil {
 				return templ_7745c5c3_Err
@@ -509,13 +509,13 @@ func sessionItem(s SessionView, grouped bool) templ.Component {
 	})
 }
 
-func openSession(id string, name string, state string) templ.ComponentScript {
+func openSession(id string, name string, state string, sessionType string) templ.ComponentScript {
 	return templ.ComponentScript{
-		Name: `__templ_openSession_f492`,
-		Function: `function __templ_openSession_f492(id, name, state){window.websessions.openTab(id, name, state);
+		Name: `__templ_openSession_d57c`,
+		Function: `function __templ_openSession_d57c(id, name, state, sessionType){window.websessions.openTab(id, name, state, sessionType);
 }`,
-		Call:       templ.SafeScript(`__templ_openSession_f492`, id, name, state),
-		CallInline: templ.SafeScriptInline(`__templ_openSession_f492`, id, name, state),
+		Call:       templ.SafeScript(`__templ_openSession_d57c`, id, name, state, sessionType),
+		CallInline: templ.SafeScriptInline(`__templ_openSession_d57c`, id, name, state, sessionType),
 	}
 }
 

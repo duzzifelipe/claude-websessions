@@ -16,15 +16,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/IgorDeo/claude-websessions/internal/doctor"
 	"github.com/IgorDeo/claude-websessions/internal/discovery"
 	"github.com/IgorDeo/claude-websessions/internal/docker"
+	"github.com/IgorDeo/claude-websessions/internal/doctor"
 	"github.com/IgorDeo/claude-websessions/internal/hooks"
-	"github.com/IgorDeo/claude-websessions/internal/updater"
-	"github.com/IgorDeo/claude-websessions/internal/service"
 	"github.com/IgorDeo/claude-websessions/internal/notification"
+	"github.com/IgorDeo/claude-websessions/internal/service"
 	"github.com/IgorDeo/claude-websessions/internal/session"
 	"github.com/IgorDeo/claude-websessions/internal/store"
+	"github.com/IgorDeo/claude-websessions/internal/updater"
 	"github.com/IgorDeo/claude-websessions/web/templates"
 )
 
@@ -154,7 +154,7 @@ func (s *Server) loadHistory(activeViews []templates.SessionView) []templates.Se
 			Name:      name,
 			WorkDir:   rec.WorkDir,
 			State:     rec.Status,
-			Type:      sessionType(rec.ID),
+			Type:      sessionType(rec.ID, rec.Provider),
 			Sandboxed: rec.Sandboxed,
 		})
 	}
@@ -169,31 +169,43 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	name := r.FormValue("name")
 	workDir := r.FormValue("work_dir")
 	prompt := r.FormValue("prompt")
+	provider, err := s.parseRequestedProvider(r.FormValue("provider"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	if name == "" || workDir == "" {
 		http.Error(w, "name and work_dir required", http.StatusBadRequest)
 		return
 	}
-	args := []string{"--name", name}
+	args := s.providerBaseArgs(provider)
+	if provider == "claude" {
+		args = append(args, "--name", name)
+	}
 	resumeID := r.FormValue("resume_id")
 	if resumeID != "" {
-		args = append(args, "--resume", resumeID)
+		if provider == "opencode" {
+			args = append(args, "--session", resumeID)
+		} else {
+			args = append(args, "--resume", resumeID)
+		}
 	}
 	if prompt != "" {
 		args = append(args, "-p", prompt)
 	}
 
 	// Sandbox support
-	var opts *session.CreateOptions
+	opts := &session.CreateOptions{Provider: provider, ExternalSessionID: resumeID}
 	if r.FormValue("sandbox") == "true" {
 		available, _, _ := docker.IsAvailable()
 		if !available {
 			http.Error(w, "Docker Desktop is not available for sandbox mode", http.StatusBadRequest)
 			return
 		}
-		opts = &session.CreateOptions{Sandboxed: true}
+		opts.Sandboxed = true
 	}
 
-	sess, err := s.mgr.Create(name, workDir, "claude", args, opts)
+	sess, err := s.mgr.Create(name, workDir, s.providerCommand(provider), args, opts)
 	if err != nil {
 		slog.Error("failed to create session", "error", err)
 		http.Error(w, "failed to create session: "+err.Error(), http.StatusInternalServerError)
@@ -202,7 +214,8 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	// Persist to SQLite immediately so it survives restarts
 	if s.store != nil {
 		_ = s.store.SaveSession(store.SessionRecord{
-			ID: sess.ID, Name: sess.Name, ClaudeID: sess.ClaudeID, WorkDir: sess.WorkDir,
+			ID: sess.ID, Name: sess.Name, Provider: sess.Provider, ExternalSessionID: sess.ExternalSessionID,
+			ClaudeID: sess.ClaudeID, WorkDir: sess.WorkDir,
 			StartTime: sess.StartTime, Status: "running", PID: sess.PID,
 			Sandboxed: sess.Sandboxed, SandboxName: sess.SandboxName,
 		})
@@ -210,6 +223,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	// Tell the client to auto-open this session and refresh the sidebar
 	w.Header().Set("X-Session-ID", sess.ID)
 	w.Header().Set("X-Session-Name", sess.Name)
+	w.Header().Set("X-Session-Type", sessionType(sess.ID, sess.Provider))
 	w.Header().Set("HX-Trigger", "refreshSidebar")
 	w.WriteHeader(http.StatusOK)
 }
@@ -259,6 +273,7 @@ func (s *Server) handleCreateTerminal(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("X-Session-ID", sess.ID)
 	w.Header().Set("X-Session-Name", sess.Name)
+	w.Header().Set("X-Session-Type", sessionType(sess.ID, sess.Provider))
 	s.handleSidebar(w, r)
 }
 
@@ -266,6 +281,9 @@ func (s *Server) handleOpenSession(w http.ResponseWriter, r *http.Request, sessi
 	sess, ok := s.mgr.Get(sessionID)
 	if ok {
 		v := sessionToView(sess)
+		w.Header().Set("X-Session-ID", v.ID)
+		w.Header().Set("X-Session-Name", v.Name)
+		w.Header().Set("X-Session-Type", v.Type)
 		if err := templates.Terminal(v.ID, v.Name, v.WorkDir, v.State).Render(r.Context(), w); err != nil {
 			slog.Error("failed to render terminal", "error", err)
 		}
@@ -278,6 +296,9 @@ func (s *Server) handleOpenSession(w http.ResponseWriter, r *http.Request, sessi
 			if name == "" {
 				name = sessionID
 			}
+			w.Header().Set("X-Session-ID", rec.ID)
+			w.Header().Set("X-Session-Name", name)
+			w.Header().Set("X-Session-Type", sessionType(rec.ID, rec.Provider))
 			if err := templates.Terminal(rec.ID, name, rec.WorkDir, rec.Status).Render(r.Context(), w); err != nil {
 				slog.Error("failed to render terminal", "error", err)
 			}
@@ -452,12 +473,16 @@ func eventMessage(eventType string) string {
 	}
 }
 
-func sessionType(id string) string {
+func sessionType(id, provider string) string {
 	if strings.HasPrefix(id, "term-") {
 		return "terminal"
 	}
 	if strings.HasPrefix(id, "discovered-") {
 		return "discovered"
+	}
+	provider = coerceProvider(provider)
+	if provider == "opencode" {
+		return "opencode"
 	}
 	return "claude"
 }
@@ -465,9 +490,116 @@ func sessionType(id string) string {
 func sessionToView(s *session.Session) templates.SessionView {
 	return templates.SessionView{
 		ID: s.ID, Name: s.Name, WorkDir: s.WorkDir,
-		State: string(s.GetState()), Type: sessionType(s.ID), Owned: s.Owned,
+		State: string(s.GetState()), Type: sessionType(s.ID, s.Provider), Owned: s.Owned,
 		Sandboxed: s.Sandboxed,
 	}
+}
+
+func normalizeProviderName(provider string) string {
+	provider = strings.TrimSpace(strings.ToLower(provider))
+	return provider
+}
+
+func isSupportedProvider(provider string) bool {
+	switch normalizeProviderName(provider) {
+	case "claude", "opencode":
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) defaultProvider() string {
+	if s.cfg == nil {
+		return "claude"
+	}
+	provider := normalizeProviderName(s.cfg.Providers.Default)
+	if !isSupportedProvider(provider) {
+		return "claude"
+	}
+	return provider
+}
+
+func (s *Server) parseRequestedProvider(provider string) (string, error) {
+	provider = normalizeProviderName(provider)
+	if provider == "" {
+		provider = s.defaultProvider()
+	}
+	if !isSupportedProvider(provider) {
+		return "", fmt.Errorf("invalid provider %q", provider)
+	}
+	return provider, nil
+}
+
+func coerceProvider(provider string) string {
+	provider = normalizeProviderName(provider)
+	if !isSupportedProvider(provider) {
+		return "claude"
+	}
+	return provider
+}
+
+func resolveProviderMetadata(provider, externalSessionID, claudeID string) (string, string, string) {
+	provider = coerceProvider(provider)
+	externalSessionID = strings.TrimSpace(externalSessionID)
+	claudeID = strings.TrimSpace(claudeID)
+	if provider == "claude" && externalSessionID == "" {
+		externalSessionID = claudeID
+	}
+	if provider == "claude" && claudeID == "" {
+		claudeID = externalSessionID
+	}
+	return provider, externalSessionID, claudeID
+}
+
+func (s *Server) providerCommand(provider string) string {
+	provider = coerceProvider(provider)
+	if s.cfg == nil {
+		if provider == "opencode" {
+			return "opencode"
+		}
+		return "claude"
+	}
+	if provider == "opencode" {
+		cmd := strings.TrimSpace(s.cfg.Providers.OpenCode.Command)
+		if cmd != "" {
+			return cmd
+		}
+		return "opencode"
+	}
+	cmd := strings.TrimSpace(s.cfg.Providers.Claude.Command)
+	if cmd != "" {
+		return cmd
+	}
+	return "claude"
+}
+
+func (s *Server) providerBaseArgs(provider string) []string {
+	provider = coerceProvider(provider)
+	if s.cfg == nil {
+		return nil
+	}
+	if provider == "opencode" {
+		return append([]string{}, s.cfg.Providers.OpenCode.Args...)
+	}
+	return append([]string{}, s.cfg.Providers.Claude.Args...)
+}
+
+func (s *Server) providerResumeCommand(provider, name, externalSessionID string) (string, []string) {
+	provider = normalizeProviderName(provider)
+	args := s.providerBaseArgs(provider)
+	if provider == "opencode" {
+		if externalSessionID != "" {
+			args = append(args, "--session", externalSessionID)
+		}
+		return s.providerCommand(provider), args
+	}
+
+	args = append(args, "--name", name)
+	if externalSessionID != "" {
+		args = append(args, "--resume", externalSessionID)
+	}
+	return s.providerCommand(provider), args
 }
 
 func (s *Server) handleTakeover(w http.ResponseWriter, r *http.Request, sessionID string) {
@@ -480,14 +612,15 @@ func (s *Server) handleTakeover(w http.ResponseWriter, r *http.Request, sessionI
 		http.Error(w, "session is not in discovered state", http.StatusBadRequest)
 		return
 	}
-	claudeID := sess.ClaudeID
+	provider, externalSessionID, claudeID := resolveProviderMetadata(sess.Provider, sess.ExternalSessionID, sess.ClaudeID)
 	workDir := sess.WorkDir
 	pid := sess.PID
 	name := sess.Name
 
 	// Try to resolve session ID if not already known
-	if claudeID == "" {
+	if provider == "claude" && externalSessionID == "" {
 		claudeID = discovery.ResolveClaudeSessionID(workDir)
+		externalSessionID = claudeID
 	}
 
 	if err := discovery.KillProcess(pid, 5*time.Second); err != nil {
@@ -497,12 +630,11 @@ func (s *Server) handleTakeover(w http.ResponseWriter, r *http.Request, sessionI
 	}
 	s.mgr.Remove(sessionID)
 
-	args := []string{"--name", name}
-	if claudeID != "" {
-		args = append(args, "--resume", claudeID)
-		slog.Info("takeover resuming session", "session", sessionID, "claude_id", claudeID)
+	command, args := s.providerResumeCommand(provider, name, externalSessionID)
+	if externalSessionID != "" {
+		slog.Info("takeover resuming session", "session", sessionID, "provider", provider, "external_session_id", externalSessionID)
 	}
-	newSess, err := s.mgr.Create(sessionID, workDir, "claude", args)
+	newSess, err := s.mgr.Create(sessionID, workDir, command, args, &session.CreateOptions{Provider: provider, ExternalSessionID: externalSessionID})
 	if err != nil {
 		slog.Error("takeover resume failed", "session", sessionID, "error", err)
 		http.Error(w, "failed to resume session: "+err.Error(), http.StatusInternalServerError)
@@ -511,6 +643,7 @@ func (s *Server) handleTakeover(w http.ResponseWriter, r *http.Request, sessionI
 	v := sessionToView(newSess)
 	w.Header().Set("X-Session-ID", v.ID)
 	w.Header().Set("X-Session-Name", v.Name)
+	w.Header().Set("X-Session-Type", v.Type)
 	_ = templates.Terminal(v.ID, v.Name, v.WorkDir, v.State).Render(r.Context(), w)
 }
 
@@ -528,7 +661,7 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 	for _, sess := range sessions {
 		result = append(result, sessionJSON{
 			ID: sess.ID, Name: sess.Name, WorkDir: sess.WorkDir,
-			State: string(sess.GetState()), Type: sessionType(sess.ID),
+			State: string(sess.GetState()), Type: sessionType(sess.ID, sess.Provider),
 		})
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -557,7 +690,8 @@ func (s *Server) handleRenameSession(w http.ResponseWriter, r *http.Request, ses
 	// Persist rename to SQLite
 	if s.store != nil {
 		_ = s.store.SaveSession(store.SessionRecord{
-			ID: sess.ID, Name: name, ClaudeID: sess.ClaudeID, WorkDir: sess.WorkDir,
+			ID: sess.ID, Name: name, Provider: sess.Provider, ExternalSessionID: sess.ExternalSessionID,
+			ClaudeID: sess.ClaudeID, WorkDir: sess.WorkDir,
 			StartTime: sess.StartTime, EndTime: sess.EndTime,
 			ExitCode: sess.ExitCode, Status: string(sess.GetState()), PID: sess.PID,
 		})
@@ -576,7 +710,8 @@ func (s *Server) handleKillSession(w http.ResponseWriter, r *http.Request, sessi
 	// Save to SQLite as killed
 	if s.store != nil {
 		_ = s.store.SaveSession(store.SessionRecord{
-			ID: sess.ID, Name: sess.Name, ClaudeID: sess.ClaudeID, WorkDir: sess.WorkDir,
+			ID: sess.ID, Name: sess.Name, Provider: sess.Provider, ExternalSessionID: sess.ExternalSessionID,
+			ClaudeID: sess.ClaudeID, WorkDir: sess.WorkDir,
 			StartTime: sess.StartTime, EndTime: time.Now(),
 			ExitCode: -1, Status: "killed", PID: sess.PID,
 		})
@@ -604,20 +739,15 @@ func (s *Server) handleRestartSession(w http.ResponseWriter, r *http.Request, se
 					if name == "" {
 						name = sessionID
 					}
-					claudeID := rec.ClaudeID
-					if claudeID == "" {
+					provider, externalSessionID, claudeID := resolveProviderMetadata(rec.Provider, rec.ExternalSessionID, rec.ClaudeID)
+					if provider == "claude" && externalSessionID == "" {
 						claudeID = discovery.ResolveClaudeSessionID(rec.WorkDir)
+						externalSessionID = claudeID
 					}
-					args := []string{"--name", name}
-					if claudeID != "" {
-						args = append(args, "--resume", claudeID)
-					}
+					command, args := s.providerResumeCommand(provider, name, externalSessionID)
 					// Preserve sandbox flag from history
-					var opts *session.CreateOptions
-					if rec.Sandboxed {
-						opts = &session.CreateOptions{Sandboxed: true}
-					}
-					newSess, err = s.mgr.Create(sessionID, rec.WorkDir, "claude", args, opts)
+					opts := &session.CreateOptions{Sandboxed: rec.Sandboxed, Provider: provider, ExternalSessionID: externalSessionID}
+					newSess, err = s.mgr.Create(sessionID, rec.WorkDir, command, args, opts)
 					if err == nil {
 						newSess.Name = name
 					}
@@ -634,12 +764,16 @@ func (s *Server) handleRestartSession(w http.ResponseWriter, r *http.Request, se
 	// Save to DB
 	if s.store != nil {
 		_ = s.store.SaveSession(store.SessionRecord{
-			ID: newSess.ID, Name: newSess.Name, ClaudeID: newSess.ClaudeID, WorkDir: newSess.WorkDir,
+			ID: newSess.ID, Name: newSess.Name, Provider: newSess.Provider, ExternalSessionID: newSess.ExternalSessionID,
+			ClaudeID: newSess.ClaudeID, WorkDir: newSess.WorkDir,
 			StartTime: newSess.StartTime, Status: "running", PID: newSess.PID,
 			Sandboxed: newSess.Sandboxed, SandboxName: newSess.SandboxName,
 		})
 	}
 	v := sessionToView(newSess)
+	w.Header().Set("X-Session-ID", v.ID)
+	w.Header().Set("X-Session-Name", v.Name)
+	w.Header().Set("X-Session-Type", v.Type)
 	if err := templates.Terminal(v.ID, v.Name, v.WorkDir, v.State).Render(r.Context(), w); err != nil {
 		slog.Error("failed to render terminal", "error", err)
 	}
@@ -706,6 +840,186 @@ func (s *Server) handleGitDiff(w http.ResponseWriter, r *http.Request, sessionID
 	}
 }
 
+type providerSessionResponse struct {
+	Provider          string `json:"provider"`
+	ExternalSessionID string `json:"external_session_id"`
+	ID                string `json:"id"`
+	Date              string `json:"date"`
+	Summary           string `json:"summary"`
+	SizeKB            int64  `json:"size_kb"`
+	modTime           time.Time
+}
+
+func normalizeWorkDir(workDir string) string {
+	if strings.HasPrefix(workDir, "~") {
+		home, _ := os.UserHomeDir()
+		workDir = home + workDir[1:]
+	}
+	return strings.TrimSuffix(workDir, "/")
+}
+
+func claudeSessionsDir(workDir string) string {
+	projectName := strings.ReplaceAll(workDir, "/", "-")
+	projectName = strings.ReplaceAll(projectName, ".", "-")
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".claude", "projects", projectName)
+}
+
+func claudeSessionSummaryFromFile(fpath string) string {
+	summary := ""
+	f, err := os.Open(fpath)
+	if err != nil {
+		return summary
+	}
+	defer f.Close() //nolint:errcheck
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 1024*64), 1024*64)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+		var obj map[string]interface{}
+		if json.Unmarshal([]byte(line), &obj) != nil {
+			continue
+		}
+		if obj["type"] != "user" {
+			continue
+		}
+		msg, ok := obj["message"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if content, ok := msg["content"].(string); ok {
+			summary = content
+		} else if contentList, ok := msg["content"].([]interface{}); ok {
+			for _, c := range contentList {
+				cm, ok := c.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				if text, ok := cm["text"].(string); ok {
+					summary = text
+					break
+				}
+			}
+		}
+		if len(summary) > 100 {
+			summary = summary[:100]
+		}
+		if summary != "" {
+			return summary
+		}
+	}
+
+	return summary
+}
+
+func listStoredProviderSessions(st *store.Store, provider, workDir string) []providerSessionResponse {
+	if st == nil {
+		return []providerSessionResponse{}
+	}
+
+	records, err := st.ListSessions(500)
+	if err != nil {
+		return []providerSessionResponse{}
+	}
+
+	provider = coerceProvider(provider)
+	workDir = normalizeWorkDir(workDir)
+	sessions := make([]providerSessionResponse, 0)
+	for _, rec := range records {
+		if coerceProvider(rec.Provider) != provider {
+			continue
+		}
+		if normalizeWorkDir(rec.WorkDir) != workDir {
+			continue
+		}
+		externalSessionID := rec.ExternalSessionID
+		if externalSessionID == "" {
+			continue
+		}
+		summary := rec.Name
+		if summary == "" {
+			summary = externalSessionID
+		}
+		sessions = append(sessions, providerSessionResponse{
+			Provider:          provider,
+			ExternalSessionID: externalSessionID,
+			ID:                rec.ID,
+			Date:              rec.StartTime.Format("2006-01-02 15:04"),
+			Summary:           summary,
+			SizeKB:            0,
+			modTime:           rec.StartTime,
+		})
+	}
+
+	sort.Slice(sessions, func(i, j int) bool {
+		return sessions[i].modTime.After(sessions[j].modTime)
+	})
+	return sessions
+}
+
+func listProviderSessions(st *store.Store, provider, workDir string) []providerSessionResponse {
+	provider = coerceProvider(provider)
+	if provider == "opencode" {
+		return listStoredProviderSessions(st, provider, workDir)
+	}
+
+	workDir = normalizeWorkDir(workDir)
+	sessionsDir := claudeSessionsDir(workDir)
+	entries, err := os.ReadDir(sessionsDir)
+	if err != nil {
+		return []providerSessionResponse{}
+	}
+
+	sessions := make([]providerSessionResponse, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
+			continue
+		}
+		sessionID := strings.TrimSuffix(entry.Name(), ".jsonl")
+		info, err := entry.Info()
+		if err != nil || info == nil {
+			continue
+		}
+
+		sessions = append(sessions, providerSessionResponse{
+			Provider:          "claude",
+			ExternalSessionID: sessionID,
+			ID:                sessionID,
+			Date:              info.ModTime().Format("2006-01-02 15:04"),
+			Summary:           claudeSessionSummaryFromFile(filepath.Join(sessionsDir, entry.Name())),
+			SizeKB:            info.Size() / 1024,
+			modTime:           info.ModTime(),
+		})
+	}
+
+	sort.Slice(sessions, func(i, j int) bool {
+		return sessions[i].modTime.After(sessions[j].modTime)
+	})
+	return sessions
+}
+
+func (s *Server) handleProviderSessions(w http.ResponseWriter, r *http.Request) {
+	provider, err := s.parseRequestedProvider(r.URL.Query().Get("provider"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	workDir := r.URL.Query().Get("work_dir")
+	if workDir == "" {
+		http.Error(w, "work_dir required", http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(listProviderSessions(s.store, provider, workDir)); err != nil {
+		slog.Error("failed to encode provider sessions", "provider", provider, "error", err)
+	}
+}
+
 // handleClaudeSessions lists claude sessions available for a given project directory.
 func (s *Server) handleClaudeSessions(w http.ResponseWriter, r *http.Request) {
 	workDir := r.URL.Query().Get("dir")
@@ -713,108 +1027,8 @@ func (s *Server) handleClaudeSessions(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "dir required", http.StatusBadRequest)
 		return
 	}
-	// Expand ~
-	if strings.HasPrefix(workDir, "~") {
-		home, _ := os.UserHomeDir()
-		workDir = home + workDir[1:]
-	}
-	// Clean trailing slash
-	workDir = strings.TrimSuffix(workDir, "/")
-
-	// Convert path to claude's project folder name: /home/user.name/foo -> -home-user-name-foo
-	// Claude replaces both / and . with -
-	projectName := strings.ReplaceAll(workDir, "/", "-")
-	projectName = strings.ReplaceAll(projectName, ".", "-")
-
-	home, _ := os.UserHomeDir()
-	sessionsDir := filepath.Join(home, ".claude", "projects", projectName)
-
-	entries, err := os.ReadDir(sessionsDir)
-	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode([]interface{}{})
-		return
-	}
-
-	type claudeSession struct {
-		ID      string `json:"id"`
-		Date    string `json:"date"`
-		Summary string `json:"summary"`
-		SizeKB  int64  `json:"size_kb"`
-	}
-
-	var sessions []claudeSession
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
-			continue
-		}
-		sessionID := strings.TrimSuffix(entry.Name(), ".jsonl")
-		info, _ := entry.Info()
-		if info == nil {
-			continue
-		}
-
-		summary := ""
-		fpath := filepath.Join(sessionsDir, entry.Name())
-		f, err := os.Open(fpath)
-		if err == nil {
-			scanner := bufio.NewScanner(f)
-			scanner.Buffer(make([]byte, 1024*64), 1024*64)
-			for scanner.Scan() {
-				line := scanner.Text()
-				if line == "" {
-					continue
-				}
-				var obj map[string]interface{}
-				if json.Unmarshal([]byte(line), &obj) != nil {
-					continue
-				}
-				if obj["type"] == "user" {
-					if msg, ok := obj["message"].(map[string]interface{}); ok {
-						if content, ok := msg["content"].(string); ok {
-							summary = content
-							if len(summary) > 100 {
-								summary = summary[:100]
-							}
-							break
-						}
-						if contentList, ok := msg["content"].([]interface{}); ok {
-							for _, c := range contentList {
-								if cm, ok := c.(map[string]interface{}); ok {
-									if text, ok := cm["text"].(string); ok {
-										summary = text
-										if len(summary) > 100 {
-											summary = summary[:100]
-										}
-										break
-									}
-								}
-							}
-							if summary != "" {
-								break
-							}
-						}
-					}
-				}
-			}
-			f.Close() //nolint:errcheck
-		}
-
-		sessions = append(sessions, claudeSession{
-			ID:      sessionID,
-			Date:    info.ModTime().Format("2006-01-02 15:04"),
-			Summary: summary,
-			SizeKB:  info.Size() / 1024,
-		})
-	}
-
-	// Sort by date descending (most recent first)
-	sort.Slice(sessions, func(i, j int) bool {
-		return sessions[i].Date > sessions[j].Date
-	})
-
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(sessions); err != nil {
+	if err := json.NewEncoder(w).Encode(listProviderSessions(s.store, "claude", workDir)); err != nil {
 		slog.Error("failed to encode claude sessions", "error", err)
 	}
 }
@@ -1143,7 +1357,8 @@ func (s *Server) handleKillAll(w http.ResponseWriter, r *http.Request) {
 			sess.Killed = true
 			if s.store != nil {
 				_ = s.store.SaveSession(store.SessionRecord{
-					ID: sess.ID, Name: sess.Name, ClaudeID: sess.ClaudeID, WorkDir: sess.WorkDir,
+					ID: sess.ID, Name: sess.Name, Provider: sess.Provider, ExternalSessionID: sess.ExternalSessionID,
+					ClaudeID: sess.ClaudeID, WorkDir: sess.WorkDir,
 					StartTime: sess.StartTime, EndTime: time.Now(),
 					ExitCode: -1, Status: "killed", PID: sess.PID,
 				})
@@ -1228,10 +1443,10 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		OutputBufferSize: s.cfg.Sessions.OutputBufferRaw,
 		DefaultDir:       s.cfg.Sessions.DefaultDir,
 		DesktopNotifs:    s.cfg.Notifications.Desktop,
-		ReminderMinutes: s.cfg.Notifications.ReminderMinutes,
-		SoundEnabled:    s.cfg.Notifications.Sound,
-		AudioDevice:     s.cfg.Notifications.AudioDevice,
-		Version:         s.version,
+		ReminderMinutes:  s.cfg.Notifications.ReminderMinutes,
+		SoundEnabled:     s.cfg.Notifications.Sound,
+		AudioDevice:      s.cfg.Notifications.AudioDevice,
+		Version:          s.version,
 	}
 	// Populate audio devices
 	for _, d := range notification.ListAudioDevices() {

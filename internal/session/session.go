@@ -26,21 +26,23 @@ const (
 type Session struct {
 	mu sync.RWMutex
 
-	ID           string
-	ClaudeID     string
-	Name         string
-	WorkDir      string
-	State        State
-	PID          int
-	StartTime    time.Time
-	EndTime      time.Time
-	ExitCode     int
-	Error        string
-	Owned        bool
-	Killed       bool   // true if intentionally killed by user
-	TmuxSession  string // tmux session name (e.g. "ws-myproject")
-	Sandboxed    bool   // running inside Docker Desktop sandbox VM
-	SandboxName  string // docker sandbox name (e.g. "ws-myproject")
+	ID                string
+	Provider          string
+	ExternalSessionID string
+	ClaudeID          string
+	Name              string
+	WorkDir           string
+	State             State
+	PID               int
+	StartTime         time.Time
+	EndTime           time.Time
+	ExitCode          int
+	Error             string
+	Owned             bool
+	Killed            bool   // true if intentionally killed by user
+	TmuxSession       string // tmux session name (e.g. "ws-myproject")
+	Sandboxed         bool   // running inside Docker Desktop sandbox VM
+	SandboxName       string // docker sandbox name (e.g. "ws-myproject")
 
 	readerPTY *os.File // PTY for the tmux attach reader (for resize)
 	output    *RingBuf

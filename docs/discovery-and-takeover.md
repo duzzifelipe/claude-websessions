@@ -2,9 +2,9 @@
 
 ## Overview
 
-The discovery and takeover system finds Claude Code CLI processes running outside websessions, displays them in the UI, and lets users "take over" those sessions -- killing the external process and resuming the same conversation inside a managed tmux session. This enables websessions to act as a command center for all Claude instances on the machine, not just the ones it spawned.
+The discovery and takeover system finds supported provider CLIs (`claude` and `opencode`) running outside websessions, displays them in the UI, and lets users "take over" those sessions -- killing the external process and resuming the same conversation inside a managed tmux session. This enables websessions to act as a command center for managed and externally-started provider sessions on the machine.
 
-The system has four stages: **scan** (find claude processes), **discover** (track them in the session manager), **resolve** (find the Claude session ID from project files), and **takeover** (kill + resume).
+The system has four stages: **scan** (find provider processes), **discover** (track them in the session manager), **resolve** (recover provider/session metadata), and **takeover** (kill + resume with provider-specific args).
 
 ---
 
@@ -60,7 +60,7 @@ The system has four stages: **scan** (find claude processes), **discover** (trac
                  |                                |
                  v                                v
          discovery.KillProcess()          mgr.Create(id, ...)
-         SIGTERM -> wait -> SIGKILL       claude --resume <id>
+         SIGTERM -> wait -> SIGKILL       provider resume command
                                                   |
                                                   v
                                      New owned tmux session
@@ -90,9 +90,9 @@ Steps:
 1. Read all entries in `/proc`
 2. Filter to numeric directories (PIDs)
 3. Read `/proc/<pid>/cmdline` -- bytes are NUL-separated, converted to space-separated string
-4. Call `ParseCmdline()` -- skip if binary basename is not `claude`
+4. Call `ParseCmdline()` -- skip if binary basename is not `claude` or `opencode`
 5. Read `/proc/<pid>/cwd` symlink for the working directory
-6. If no `--resume` or `--session-id` flag found, resolve session ID from `~/.claude/projects/`
+6. If provider is `claude` and no `--resume`/`--session-id`/`--session` flag is found, resolve session ID from `~/.claude/projects/`
 
 ### macOS: ps + lsof Scanning
 
@@ -100,7 +100,7 @@ macOS lacks `/proc`, so the scanner uses standard Unix tools:
 
 ```
 Step 1:  ps -eo pid,comm
-         filter lines where comm basename == "claude"
+         filter lines where comm basename is a supported provider binary
          collect candidate PIDs
 
 Step 2:  For each PID:
@@ -127,48 +127,58 @@ The `lsof` output format uses tagged fields. Lines starting with `n` contain the
 
 ### Binary Detection
 
-The scanner looks for processes whose binary basename is exactly `claude`:
+The scanner looks for processes whose binary basename maps to a supported provider:
 
 ```go
-func IsClaudeBinary(path string) bool {
-    return filepath.Base(path) == "claude"
+func ProviderForBinary(path string) (string, bool) {
+    switch filepath.Base(path) {
+    case "claude":
+        return "claude", true
+    case "opencode":
+        return "opencode", true
+    default:
+        return "", false
+    }
 }
 ```
 
-This matches `/usr/local/bin/claude`, `/home/user/.local/bin/claude`, or just `claude`. It does not match `claude-code`, `node`, or wrapper scripts.
+This matches `/usr/local/bin/claude`, `/usr/local/bin/opencode`, and basename invocations (`claude`, `opencode`). It does not match `claude-code`, `node`, or wrapper scripts.
 
 ### Command Line Parsing
 
 `ParseCmdline()` extracts structured information from the command line string:
 
 ```
-Input:  "claude --resume abc-123 --name myproject"
+Input:  "opencode --session oc-123"
 
 Parsed:
-  Binary:   "claude"
-  Args:     ["--resume", "abc-123", "--name", "myproject"]
-  ClaudeID: "abc-123"    (from --resume flag)
+  Binary:            "opencode"
+  Provider:          "opencode"
+  Args:              ["--session", "oc-123"]
+  ExternalSessionID: "oc-123"
 ```
 
-Two flags are checked for the Claude session ID:
+Flag precedence is provider-specific:
 
-| Flag | Priority | Purpose |
-|------|----------|---------|
-| `--resume` | First | Resume an existing Claude conversation |
-| `--session-id` | Fallback | Alternative way to specify session |
+| Provider | Priority order | Notes |
+|----------|----------------|-------|
+| `claude` | `--resume`, then `--session-id`, then `--session` | `ClaudeID` mirrors resolved external session ID |
+| `opencode` | `--session`, then `--session-id`, then `--resume` | Session ID is tracked in `ExternalSessionID`; no `.claude` fallback |
 
-If `--resume` is found, `--session-id` is ignored. If neither flag is present, the session ID is resolved later from project files.
+If no supported flag is present, only `claude` attempts fallback resolution from project files.
 
 ### The ProcessInfo Struct
 
 ```go
 type ProcessInfo struct {
-    PID       int       // OS process ID
-    Binary    string    // full path or basename of the claude binary
-    WorkDir   string    // current working directory of the process
-    Args      []string  // command line arguments (excluding binary)
-    ClaudeID  string    // Claude session ID (from --resume or project files)
-    StartTime time.Time // process start time (used for session ID resolution)
+    PID               int       // OS process ID
+    Binary            string    // full path or basename of the provider binary
+    Provider          string    // "claude" or "opencode"
+    WorkDir           string    // current working directory of the process
+    Args              []string  // command line arguments (excluding binary)
+    ExternalSessionID string    // provider session ID from CLI flags/fallbacks
+    ClaudeID          string    // claude-only mirror of ExternalSessionID
+    StartTime         time.Time // process start time (used for claude ID resolution)
 }
 ```
 
@@ -245,7 +255,7 @@ Their ID is always `discovered-<PID>`, e.g., `discovered-12345`.
 
 ---
 
-## Claude Project File Scanning
+## Claude Project File Scanning (Claude Provider Only)
 
 Claude Code stores conversation history in `~/.claude/projects/`. The directory structure uses a mangled version of the working directory path:
 
@@ -318,11 +328,11 @@ This handles the case where multiple Claude instances share the same working dir
 
 | Caller | When | Function Used |
 |--------|------|---------------|
-| `scanLinux()` / `scanDarwin()` | During process scan, if no `--resume` flag | `ResolveClaudeSessionIDForProcess()` |
-| `handleTakeover()` | Before killing, if ClaudeID is empty | `ResolveClaudeSessionID()` |
-| `OnStateChange` callback | When session changes state and has no ClaudeID | `ResolveClaudeSessionID()` |
-| `RecoverTmuxSessions()` | Reattaching to existing tmux sessions | `ResolveClaudeSessionID()` |
-| `Restart()` | Resuming an offline session | `ResolveClaudeSessionID()` |
+| `scanLinux()` / `scanDarwin()` | During process scan, when provider=`claude` and no external session ID in args | `ResolveClaudeSessionIDForProcess()` |
+| `handleTakeover()` | Before killing, when provider=`claude` and no external session ID | `ResolveClaudeSessionID()` |
+| `OnStateChange` callback | State change for `claude` sessions missing `ClaudeID` | `ResolveClaudeSessionID()` |
+| `RecoverTmuxSessions()` | Reattaching tmux sessions with claude provider metadata | `ResolveClaudeSessionID()` |
+| `Restart()` | Restarting offline claude sessions with missing external session ID | `ResolveClaudeSessionID()` |
 
 ---
 
@@ -389,8 +399,8 @@ Browser: POST /session/discovered-12345/takeover
          Validate: state must be "discovered"
                       |
                       v
-         Resolve ClaudeID if empty
-         (ResolveClaudeSessionID from project files)
+         Resolve external session ID if needed
+         (claude only: ResolveClaudeSessionID from project files)
                       |
                       v
          discovery.KillProcess(pid, 5s timeout)
@@ -415,12 +425,15 @@ Browser: POST /session/discovered-12345/takeover
   (remove discovered session from manager)
          |
          v
-  mgr.Create("discovered-12345", workDir, "claude", args)
-         |
-         v
-  args = ["--name", "<project-name>"]
-  if claudeID != "":
-    args += ["--resume", "<claude-session-id>"]
+  mgr.Create("discovered-12345", workDir, providerCommand, args)
+          |
+          v
+  if provider == "claude":
+    args = ["--name", "<project-name>"]
+    if externalSessionID != "": args += ["--resume", "<session-id>"]
+  if provider == "opencode":
+    args = []
+    if externalSessionID != "": args += ["--session", "<session-id>"]
          |
          v
   New tmux session created
@@ -451,15 +464,23 @@ If timeout reached:
 
 This gives Claude Code time to save state before being forcefully terminated.
 
-### The --resume Flag
+### Provider Resume Flags
 
-The critical piece of takeover is the `--resume` flag. When websessions starts a new `claude` process with `--resume <session-id>`, Claude Code loads the conversation history from `~/.claude/projects/<project>/<session-id>.jsonl` and continues the conversation where it left off. Without `--resume`, a fresh conversation would start.
+Takeover uses provider-specific resume arguments:
+
+- `claude`: starts `claude --name <name> --resume <session-id>` when an ID is available
+- `opencode`: starts `opencode --session <session-id>` when an ID is available
+
+For Claude, `--resume` maps to `~/.claude/projects/<project>/<session-id>.jsonl`. For OpenCode, websessions only reuses IDs it observed from process args or stored records.
 
 ---
 
-## handleClaudeSessions: Browsing Project Files
+## Provider Session Listing
 
-The `GET /api/claude-sessions?dir=<path>` endpoint lets the UI list all Claude session files for a given working directory. This is used by the session picker when creating a new session with `--resume`:
+The UI uses `GET /api/provider-sessions?provider=<claude|opencode>&work_dir=<path>` to list resumable sessions:
+
+- `provider=claude`: reads `~/.claude/projects/<mangled-workdir>/*.jsonl` (same behavior as legacy `GET /api/claude-sessions?dir=...`)
+- `provider=opencode`: reads session records from SQLite (`provider`, `external_session_id`, `work_dir`)
 
 ```
 GET /api/claude-sessions?dir=/home/user/myproject
@@ -495,7 +516,7 @@ Return JSON sorted by date (most recent first):
 
 ```yaml
 sessions:
-  scan_interval: 30s    # How often to scan for new claude processes
+  scan_interval: 30s    # How often to scan for new external provider processes
                         # Default: 30s
                         # Set to 0 to disable background scanning
                         # (initial startup scan always runs)
@@ -543,9 +564,9 @@ Name: "myproject"
 
 The notification still fires, but there is no session in the manager to click on. The user sees the notification but cannot navigate to the session.
 
-### No ClaudeID Available
+### No External Session ID Available
 
-If no `--resume` flag was in the command line AND no `.jsonl` files exist in the project directory, the session ID remains empty. Takeover will still work -- it kills the process and starts a fresh `claude` session in the same directory, but the conversation history will not carry over.
+If no session flag is present in the command line, the session ID may remain empty. For Claude, websessions also attempts `.jsonl` fallback resolution; for OpenCode there is no filesystem fallback. Takeover still works, but it starts without a resume/session flag so history continuity depends on provider behavior.
 
 ### Multiple Claude Instances in Same Directory
 
@@ -564,6 +585,8 @@ For each session in completed or errored state:
 ---
 
 ## Complete Example Flow
+
+The detailed walkthrough below uses Claude; OpenCode follows the same scan/dedup/takeover mechanics but resumes with `opencode --session <id>`.
 
 ```
 1. User starts "claude" in terminal at ~/myproject

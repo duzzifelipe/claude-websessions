@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -11,17 +12,19 @@ import (
 type Store struct{ db *sql.DB }
 
 type SessionRecord struct {
-	ID          string
-	Name        string
-	ClaudeID    string
-	WorkDir     string
-	StartTime   time.Time
-	EndTime     time.Time
-	ExitCode    int
-	Status      string
-	PID         int
-	Sandboxed   bool
-	SandboxName string
+	ID                string
+	Name              string
+	Provider          string
+	ExternalSessionID string
+	ClaudeID          string
+	WorkDir           string
+	StartTime         time.Time
+	EndTime           time.Time
+	ExitCode          int
+	Status            string
+	PID               int
+	Sandboxed         bool
+	SandboxName       string
 }
 
 type NotificationRecord struct {
@@ -50,7 +53,7 @@ func (s *Store) Close() error { return s.db.Close() }
 func migrate(db *sql.DB) error {
 	schema := `
 	CREATE TABLE IF NOT EXISTS sessions (
-		id TEXT PRIMARY KEY, name TEXT, claude_id TEXT, work_dir TEXT,
+		id TEXT PRIMARY KEY, name TEXT, provider TEXT, external_session_id TEXT, claude_id TEXT, work_dir TEXT,
 		start_time DATETIME, end_time DATETIME,
 		exit_code INTEGER, status TEXT, pid INTEGER
 	);
@@ -76,20 +79,37 @@ func migrate(db *sql.DB) error {
 	// Migration: add sandbox columns
 	_, _ = db.Exec("ALTER TABLE sessions ADD COLUMN sandboxed BOOLEAN DEFAULT FALSE")
 	_, _ = db.Exec("ALTER TABLE sessions ADD COLUMN sandbox_name TEXT DEFAULT ''")
+	// Migration: add provider columns
+	_, _ = db.Exec("ALTER TABLE sessions ADD COLUMN provider TEXT DEFAULT ''")
+	_, _ = db.Exec("ALTER TABLE sessions ADD COLUMN external_session_id TEXT DEFAULT ''")
 	return nil
 }
 
 func (s *Store) SaveSession(r SessionRecord) error {
+	provider := strings.ToLower(strings.TrimSpace(r.Provider))
+	externalSessionID := r.ExternalSessionID
+	claudeID := r.ClaudeID
+	if provider == "" && claudeID != "" {
+		provider = "claude"
+	}
+	if provider == "claude" {
+		if claudeID == "" {
+			claudeID = externalSessionID
+		}
+		if externalSessionID == "" {
+			externalSessionID = claudeID
+		}
+	}
 	_, err := s.db.Exec(
-		`INSERT OR REPLACE INTO sessions (id, name, claude_id, work_dir, start_time, end_time, exit_code, status, pid, sandboxed, sandbox_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		r.ID, r.Name, r.ClaudeID, r.WorkDir, r.StartTime, r.EndTime, r.ExitCode, r.Status, r.PID, r.Sandboxed, r.SandboxName,
+		`INSERT OR REPLACE INTO sessions (id, name, provider, external_session_id, claude_id, work_dir, start_time, end_time, exit_code, status, pid, sandboxed, sandbox_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.ID, r.Name, provider, externalSessionID, claudeID, r.WorkDir, r.StartTime, r.EndTime, r.ExitCode, r.Status, r.PID, r.Sandboxed, r.SandboxName,
 	)
 	return err
 }
 
 func (s *Store) ListSessions(limit int) ([]SessionRecord, error) {
 	rows, err := s.db.Query(
-		`SELECT id, COALESCE(name, ''), claude_id, work_dir, start_time, end_time, exit_code, status, pid, COALESCE(sandboxed, 0), COALESCE(sandbox_name, '') FROM sessions ORDER BY start_time DESC LIMIT ?`,
+		`SELECT id, COALESCE(name, ''), COALESCE(provider, ''), COALESCE(external_session_id, ''), COALESCE(claude_id, ''), work_dir, start_time, end_time, exit_code, status, pid, COALESCE(sandboxed, 0), COALESCE(sandbox_name, '') FROM sessions ORDER BY start_time DESC LIMIT ?`,
 		limit,
 	)
 	if err != nil {
@@ -99,8 +119,20 @@ func (s *Store) ListSessions(limit int) ([]SessionRecord, error) {
 	var records []SessionRecord
 	for rows.Next() {
 		var r SessionRecord
-		if err := rows.Scan(&r.ID, &r.Name, &r.ClaudeID, &r.WorkDir, &r.StartTime, &r.EndTime, &r.ExitCode, &r.Status, &r.PID, &r.Sandboxed, &r.SandboxName); err != nil {
+		if err := rows.Scan(&r.ID, &r.Name, &r.Provider, &r.ExternalSessionID, &r.ClaudeID, &r.WorkDir, &r.StartTime, &r.EndTime, &r.ExitCode, &r.Status, &r.PID, &r.Sandboxed, &r.SandboxName); err != nil {
 			return nil, err
+		}
+		r.Provider = strings.ToLower(strings.TrimSpace(r.Provider))
+		if r.Provider == "" && r.ClaudeID != "" {
+			r.Provider = "claude"
+		}
+		if r.Provider == "claude" {
+			if r.ExternalSessionID == "" {
+				r.ExternalSessionID = r.ClaudeID
+			}
+			if r.ClaudeID == "" {
+				r.ClaudeID = r.ExternalSessionID
+			}
 		}
 		records = append(records, r)
 	}
@@ -140,10 +172,22 @@ func (s *Store) ListNotifications(limit int, includeRead bool) ([]NotificationRe
 func (s *Store) GetSession(id string) (*SessionRecord, error) {
 	var r SessionRecord
 	err := s.db.QueryRow(
-		`SELECT id, COALESCE(name, ''), claude_id, work_dir, start_time, end_time, exit_code, status, pid, COALESCE(sandboxed, 0), COALESCE(sandbox_name, '') FROM sessions WHERE id = ?`, id,
-	).Scan(&r.ID, &r.Name, &r.ClaudeID, &r.WorkDir, &r.StartTime, &r.EndTime, &r.ExitCode, &r.Status, &r.PID, &r.Sandboxed, &r.SandboxName)
+		`SELECT id, COALESCE(name, ''), COALESCE(provider, ''), COALESCE(external_session_id, ''), COALESCE(claude_id, ''), work_dir, start_time, end_time, exit_code, status, pid, COALESCE(sandboxed, 0), COALESCE(sandbox_name, '') FROM sessions WHERE id = ?`, id,
+	).Scan(&r.ID, &r.Name, &r.Provider, &r.ExternalSessionID, &r.ClaudeID, &r.WorkDir, &r.StartTime, &r.EndTime, &r.ExitCode, &r.Status, &r.PID, &r.Sandboxed, &r.SandboxName)
 	if err != nil {
 		return nil, err
+	}
+	r.Provider = strings.ToLower(strings.TrimSpace(r.Provider))
+	if r.Provider == "" && r.ClaudeID != "" {
+		r.Provider = "claude"
+	}
+	if r.Provider == "claude" {
+		if r.ExternalSessionID == "" {
+			r.ExternalSessionID = r.ClaudeID
+		}
+		if r.ClaudeID == "" {
+			r.ClaudeID = r.ExternalSessionID
+		}
 	}
 	return &r, nil
 }
