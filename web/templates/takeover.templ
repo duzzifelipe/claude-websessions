@@ -1,0 +1,36 @@
+package templates
+
+templ TakeoverModal(sessionID string, sessionName string, workDir string, dockerAvailable bool) {
+	<div class="modal-overlay" onclick="this.remove()">
+		<div class="modal-content" onclick="event.stopPropagation()">
+			<h2>Take Over Session</h2>
+			<form hx-post={ "/sessions/" + sessionID + "/takeover" } hx-target="#terminal-area" hx-swap="innerHTML">
+				<div class="form-group">
+					<label>Session</label>
+					<div style="font-size:0.85rem; color:var(--text-secondary); padding:0.3rem 0;">{ sessionName }</div>
+				</div>
+				<div class="form-group">
+					<label>Working Directory</label>
+					<div style="font-size:0.85rem; color:var(--text-secondary); padding:0.3rem 0;">{ workDir }</div>
+				</div>
+				<div class="form-group">
+					<label style="display:flex; align-items:center; gap:0.5rem; cursor:pointer; font-size:0.8rem; color:var(--text-secondary); font-weight:500;">
+						if dockerAvailable {
+							<input type="checkbox" name="sandbox" value="true" style="width:16px; height:16px; flex-shrink:0; accent-color:var(--accent);"/>
+						} else {
+							<input type="checkbox" name="sandbox" value="true" disabled style="width:16px; height:16px; flex-shrink:0;"/>
+						}
+						Run in Docker sandbox
+					</label>
+					if !dockerAvailable {
+						<span class="settings-hint">Docker Desktop is required for sandbox mode</span>
+					}
+				</div>
+				<div class="form-actions">
+					<button type="button" class="btn-cancel" onclick="this.closest('.modal-overlay').remove()">Cancel</button>
+					<button type="submit" class="btn-create">Take Over</button>
+				</div>
+			</form>
+		</div>
+	</div>
+}
