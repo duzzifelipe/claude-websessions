@@ -488,6 +488,18 @@ func sessionToView(s *session.Session) templates.SessionView {
 	}
 }
 
+func (s *Server) handleTakeoverModal(w http.ResponseWriter, r *http.Request, sessionID string) {
+	sess, ok := s.mgr.Get(sessionID)
+	if !ok {
+		http.Error(w, "session not found", http.StatusNotFound)
+		return
+	}
+	dockerAvailable, _, _ := docker.IsAvailable()
+	if err := templates.TakeoverModal(sess.ID, sess.Name, sess.WorkDir, dockerAvailable).Render(r.Context(), w); err != nil {
+		slog.Error("failed to render takeover modal", "error", err)
+	}
+}
+
 func (s *Server) handleTakeover(w http.ResponseWriter, r *http.Request, sessionID string) {
 	sess, ok := s.mgr.Get(sessionID)
 	if !ok {
@@ -520,11 +532,25 @@ func (s *Server) handleTakeover(w http.ResponseWriter, r *http.Request, sessionI
 		args = append(args, "--resume", claudeID)
 		slog.Info("takeover resuming session", "session", sessionID, "claude_id", claudeID)
 	}
-	newSess, err := s.mgr.Create(sessionID, workDir, "claude", args)
+	var opts *session.CreateOptions
+	if err := r.ParseForm(); err == nil && r.FormValue("sandbox") == "true" {
+		available, _, _ := docker.IsAvailable()
+		if available {
+			opts = &session.CreateOptions{Sandboxed: true}
+		}
+	}
+	newSess, err := s.mgr.Create(sessionID, workDir, "claude", args, opts)
 	if err != nil {
 		slog.Error("takeover resume failed", "session", sessionID, "error", err)
 		http.Error(w, "failed to resume session: "+err.Error(), http.StatusInternalServerError)
 		return
+	}
+	if s.store != nil {
+		_ = s.store.SaveSession(store.SessionRecord{
+			ID: newSess.ID, Name: newSess.Name, ClaudeID: newSess.ClaudeID, WorkDir: newSess.WorkDir,
+			StartTime: newSess.StartTime, Status: "running", PID: newSess.PID,
+			Sandboxed: newSess.Sandboxed, SandboxName: newSess.SandboxName,
+		})
 	}
 	v := sessionToView(newSess)
 	w.Header().Set("X-Session-ID", v.ID)

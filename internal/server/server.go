@@ -109,6 +109,9 @@ func (s *Server) routes() http.Handler {
 	r.Post("/sessions/{sessionID}/restart", func(w http.ResponseWriter, r *http.Request) {
 		s.handleRestartSession(w, r, chi.URLParam(r, "sessionID"))
 	})
+	r.Get("/sessions/{sessionID}/takeover", func(w http.ResponseWriter, r *http.Request) {
+		s.handleTakeoverModal(w, r, chi.URLParam(r, "sessionID"))
+	})
 	r.Post("/sessions/{sessionID}/takeover", func(w http.ResponseWriter, r *http.Request) {
 		s.handleTakeover(w, r, chi.URLParam(r, "sessionID"))
 	})

@@ -155,7 +155,7 @@ templ sessionItem(s SessionView, grouped bool) {
 			</div>
 		}
 		if s.State == "discovered" {
-			<button class="takeover-btn" hx-post={ "/sessions/" + s.ID + "/takeover" } hx-target="#terminal-area" hx-swap="innerHTML">Take Over</button>
+			<button class="takeover-btn" hx-get={ "/sessions/" + s.ID + "/takeover" } hx-target="#modal" hx-swap="innerHTML">Take Over</button>
 		}
 		if s.State == "offline" {
 			<button class="restart-btn" hx-post={ "/sessions/" + s.ID + "/restart" } hx-target="#terminal-area" hx-swap="innerHTML">Restart</button>
