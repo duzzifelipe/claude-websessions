@@ -119,6 +119,9 @@ func (s *Server) routes() http.Handler {
 		s.handleSetSessionColor(w, r, chi.URLParam(r, "sessionID"))
 	})
 
+	// Docker
+	r.Get("/api/docker/available", s.handleDockerAvailable)
+
 	// Iframe panes
 	r.Post("/panes/iframe/open", s.handleOpenIframe)
 	r.Post("/api/panes/iframe", s.handleCreateIframePane)

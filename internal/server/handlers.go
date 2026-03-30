@@ -382,6 +382,12 @@ func (s *Server) handleNewSessionModal(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) handleDockerAvailable(w http.ResponseWriter, r *http.Request) {
+	available, _, _ := docker.IsAvailable()
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]bool{"available": available})
+}
+
 func (s *Server) handleRecentProjects(w http.ResponseWriter, r *http.Request) {
 	var dirs []string
 	if s.store != nil {
