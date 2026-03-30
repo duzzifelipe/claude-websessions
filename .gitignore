@@ -1,3 +1,4 @@
 bin/
 cmd/websessions/webview-helper
 .local/
+.worktrees/
