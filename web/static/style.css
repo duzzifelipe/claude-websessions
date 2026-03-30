@@ -488,6 +488,8 @@ html, body {
 .ctx-item:hover { background: var(--accent-glow); color: var(--text-primary); }
 .ctx-danger { color: var(--red); }
 .ctx-danger:hover { background: var(--red-glow); color: var(--red); }
+.ctx-disabled { opacity: 0.4; cursor: not-allowed; }
+.ctx-disabled:hover { background: none; color: var(--text-secondary); }
 .ctx-separator { height: 1px; background: var(--border); margin: 0.25rem 0.5rem; }
 
 /* Drop Zones */

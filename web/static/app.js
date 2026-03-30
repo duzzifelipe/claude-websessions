@@ -1859,6 +1859,34 @@ window.websessions = (function() {
     }, 200);
   }
 
+  // Docker availability cache for context menu
+  var _dockerAvailable = null;
+  function checkDockerAvailable(cb) {
+    if (_dockerAvailable !== null) return cb(_dockerAvailable);
+    fetch('/api/docker/available').then(function(r) { return r.json(); }).then(function(d) {
+      _dockerAvailable = d.available;
+      cb(_dockerAvailable);
+    }).catch(function() { _dockerAvailable = false; cb(false); });
+  }
+
+  function forkIntoSandbox(sessionID) {
+    fetch('/api/sessions').then(function(r) { return r.json(); }).then(function(sessions) {
+      var sess = sessions.find(function(s) { return s.id === sessionID; });
+      if (!sess) { console.error('session not found for fork'); return; }
+      var form = new FormData();
+      form.append('name', sess.name + '-sandbox');
+      form.append('work_dir', sess.work_dir);
+      form.append('sandbox', 'true');
+      fetch('/sessions', { method: 'POST', body: form }).then(function(r) {
+        if (!r.ok) return r.text().then(function(t) { throw new Error(t); });
+        var newID = r.headers.get('X-Session-ID');
+        var newName = r.headers.get('X-Session-Name');
+        if (newID) openTab(newID, newName || newID, 'starting');
+        refreshSidebar();
+      }).catch(function(err) { console.error('fork into sandbox failed:', err); });
+    });
+  }
+
   // Tab context menu
   function showTabContextMenu(e, tabId, tabName) {
     closeTabContextMenu();
@@ -1871,6 +1899,8 @@ window.websessions = (function() {
     var items = [
       { label: 'Close tab', action: function() { closeTab(tabId); } },
       { label: 'Close & stop session', cls: 'ctx-danger', action: function() { killSession(tabId); } },
+      { type: 'separator' },
+      { label: 'Fork into sandbox', id: 'ctx-fork-sandbox', action: function() { forkIntoSandbox(tabId); } },
       { type: 'separator' },
       { label: 'Close other tabs', action: function() {
         var keep = openTabs.filter(function(t) { return t.id === tabId; });
@@ -1909,13 +1939,26 @@ window.websessions = (function() {
       }
       var el = document.createElement('div');
       el.className = 'ctx-item' + (item.cls ? ' ' + item.cls : '');
+      if (item.id) el.id = item.id;
       el.textContent = item.label;
       el.addEventListener('click', function(ev) {
         ev.stopPropagation();
+        if (el.classList.contains('ctx-disabled')) return;
         closeTabContextMenu();
         item.action();
       });
       menu.appendChild(el);
+    });
+
+    // Disable fork-into-sandbox if Docker is unavailable
+    checkDockerAvailable(function(available) {
+      if (!available) {
+        var forkEl = menu.querySelector('#ctx-fork-sandbox');
+        if (forkEl) {
+          forkEl.classList.add('ctx-disabled');
+          forkEl.title = 'Docker Desktop is required for sandbox mode';
+        }
+      }
     });
 
     document.body.appendChild(menu);
